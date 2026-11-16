@@ -1,0 +1,2017 @@
+{
+  "name": "FynBeats ETF Machine V3",
+  "nodes": [
+    {
+      "parameters": {
+        "url": "https://api.cryptoetf.today/api/v1/flows/summary",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_CRYPTOETF_API_KEY"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1824,
+        16
+      ],
+      "id": "bc7ed4a5-932d-47f5-b882-f2f2e5fed2c1",
+      "name": "CryptoETF - Daily Flow Summary"
+    },
+    {
+      "parameters": {
+        "jsCode": "const assets = $json.assets || [];\n\nconst trackedSymbols = ['BTC', 'ETH'];\n\nconst trackedAssets = assets.filter(asset =>\n  trackedSymbols.includes(asset.symbol)\n);\n\nreturn [\n  {\n    json: {\n      assets: trackedAssets,\n      updatedAt: $json.updatedAt\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1616,
+        16
+      ],
+      "id": "f31cd21f-8ebc-48bb-9b4c-a834b20b6242",
+      "name": "Select Tracked ETF Assets"
+    },
+    {
+      "parameters": {
+        "jsCode": "const assets = $json.assets || [];\n\nconst requiredSymbols = ['BTC', 'ETH'];\n\n// ========================================\n// BASIC VALIDATION\n// ========================================\n\nconst missingAssets = [];\nconst invalidAssets = [];\n\nfor (const symbol of requiredSymbols) {\n  const asset = assets.find(a => a.symbol === symbol);\n\n  if (!asset) {\n    missingAssets.push(symbol);\n    continue;\n  }\n\n  const flow = asset.netFlowUsdM;\n\n  // IMPORTANT:\n  // 0 is a VALID ETF flow value.\n  if (\n    flow === null ||\n    flow === undefined ||\n    flow === '' ||\n    Number.isNaN(Number(flow))\n  ) {\n    invalidAssets.push(symbol);\n  }\n}\n\n\n// ========================================\n// GROUP ASSETS BY DATE\n// ========================================\n\nconst assetsByDate = {};\n\nfor (const asset of assets) {\n  if (!asset.date) continue;\n\n  if (!assetsByDate[asset.date]) {\n    assetsByDate[asset.date] = [];\n  }\n\n  assetsByDate[asset.date].push(asset.symbol);\n}\n\n\n// ========================================\n// FIND LATEST DATE\n// ========================================\n\nconst dates = Object.keys(assetsByDate).sort();\n\nconst latestDate =\n  dates.length > 0\n    ? dates[dates.length - 1]\n    : null;\n\n\n// ========================================\n// CHECK WHICH ASSETS HAVE LATEST DATE\n// ========================================\n\nconst assetsOnLatestDate = latestDate\n  ? assets.filter(a => a.date === latestDate)\n  : [];\n\nconst symbolsOnLatestDate =\n  assetsOnLatestDate.map(a => a.symbol);\n\nconst waitingFor = requiredSymbols.filter(\n  symbol => !symbolsOnLatestDate.includes(symbol)\n);\n\n\n// ========================================\n// FINAL STATUS\n// ========================================\n\nconst basicDataValid =\n  missingAssets.length === 0 &&\n  invalidAssets.length === 0;\n\nconst allAssetsSameDate =\n  basicDataValid &&\n  waitingFor.length === 0;\n\nreturn [\n  {\n    json: {\n      assets,\n      updatedAt: $json.updatedAt,\n\n      validation: {\n        basicDataValid,\n        allAssetsSameDate,\n        latestDate,\n\n        missingAssets,\n        invalidAssets,\n        waitingFor,\n\n        assetsByDate\n      }\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1408,
+        16
+      ],
+      "id": "40a6896e-a65f-4bfb-b0d0-5982386b5110",
+      "name": "Validate ETF Flow Data"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 3-7 * * *"
+            },
+            {
+              "field": "cronExpression",
+              "expression": "0 0 8,10,13,16,19,22 * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -2016,
+        16
+      ],
+      "id": "2131d533-d44e-4dfd-ad46-81e865c71f00",
+      "name": "ETF Flow Polling Schedule"
+    },
+    {
+      "parameters": {
+        "jsCode": "const assets = $json.assets || [];\nconst validation = $json.validation || {};\n\nconst targetDate = validation.latestDate;\n\n// ========================================\n// NO TRADING DATE\n// ========================================\n\nif (!targetDate) {\n  return [\n    {\n      json: {\n        ...$json,\n        publishCheck: {\n          targetDate: null,\n          readyAssets: [],\n          pendingAssets: [],\n          readyCount: 0,\n          totalTracked: 2,\n          shouldContinue: false,\n          reason: 'NO_TARGET_DATE'\n        }\n      }\n    }\n  ];\n}\n\n\n// ========================================\n// ASSETS ON TARGET DATE\n// ========================================\n\nconst readyAssets = assets.filter(\n  asset => asset.date === targetDate\n);\n\nconst pendingAssets = assets\n  .filter(asset => asset.date !== targetDate)\n  .map(asset => ({\n    symbol: asset.symbol,\n    lastAvailableDate: asset.date\n  }));\n\n\n// ========================================\n// FINAL DATA GUARD\n// BTC + ETH must be on the same date.\n// ========================================\n\nconst shouldContinue =\n  validation.basicDataValid === true &&\n  validation.allAssetsSameDate === true &&\n  readyAssets.length === 2;\n\n\n// ========================================\n// OUTPUT\n// ========================================\n\nreturn [\n  {\n    json: {\n      ...$json,\n\n      publishCheck: {\n        targetDate,\n        readyAssets,\n        pendingAssets,\n        readyCount: readyAssets.length,\n        totalTracked: 2,\n        shouldContinue,\n\n        reason: shouldContinue\n          ? 'ALL_ASSETS_READY'\n          : 'WAITING_FOR_ALL_ASSETS'\n      }\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1200,
+        16
+      ],
+      "id": "76f0e5f0-3fa9-4a93-aac0-bd9049a1e8d4",
+      "name": "Determine ETF Trading Date"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "YOUR_ETF_FLOW_PUBLISH_STATE_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "ETF Flow Publish State"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyValue": "1"
+            }
+          ]
+        },
+        "limit": 1
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1248,
+        272
+      ],
+      "id": "3d8f0c8d-823c-40b9-828c-09effc9cc0b0",
+      "name": "Get Last Published ETF Date"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// CHECK NEW ETF TRADING DATE\n// Duplicate protection\n// ==========================================\n\nconst lastPublishedDate = $json.lastPublishedDate;\n\nconst targetDate =\n  $('Build Final ETF Dataset').first().json.targetDate;\n\nif (!targetDate) {\n  throw new Error('Final ETF target trading date not found');\n}\n\nif (!lastPublishedDate) {\n  throw new Error('Last published ETF date not found');\n}\n\nconst isNewTradingDate =\n  targetDate > lastPublishedDate;\n\nreturn [\n  {\n    json: {\n      targetDate,\n      lastPublishedDate,\n      isNewTradingDate,\n      decision: isNewTradingDate\n        ? 'CONTINUE'\n        : 'STOP'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1472,
+        272
+      ],
+      "id": "4414ee45-75f6-4141-811c-cb57bdeb88a1",
+      "name": "Check New ETF Trading Date"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2b018b21-3ec2-430e-a5f3-f3c460669e72",
+              "leftValue": "={{$json.isNewTradingDate}}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1712,
+        272
+      ],
+      "id": "b521928f-2563-4d00-94cc-ea2cdc3c8365",
+      "name": "New ETF Trading Date?"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// FYNBEAT — DAILY CRYPTO ETF TWEET V2\n// BTC / ETH REQUIRED\n// HISTORICAL CONTEXT PRESERVED\n// NO TOTAL NET FLOW\n// ==========================================\n\nconst targetDate = $json.targetDate;\nconst assets = $json.assets || [];\nconst historicalTweetContext =\n  $json.historicalTweetContext || {};\n\nconst requiredSymbols = ['BTC', 'ETH'];\nconst displayOrder = ['BTC', 'ETH'];\n\nconst displayNames = {\n  BTC: 'BTC',\n  ETH: 'ETH'\n};\n\n// ------------------------------------------\n// 1. DATE VALIDATION\n// ------------------------------------------\n\nif (\n  typeof targetDate !== 'string' ||\n  !/^\\d{4}-\\d{2}-\\d{2}$/.test(targetDate) ||\n  new Date(`${targetDate}T12:00:00Z`)\n    .toISOString()\n    .slice(0, 10) !== targetDate\n) {\n  throw new Error('Invalid ETF target date.');\n}\n\n// ------------------------------------------\n// 2. DATA VALIDATION\n// ------------------------------------------\n\nif (!Array.isArray(assets)) {\n  throw new Error('ETF assets must be an array.');\n}\n\nconst seenSymbols = new Set();\n\nfor (const asset of assets) {\n\n  if (!displayOrder.includes(asset.symbol)) {\n    throw new Error(\n      `Unexpected ETF symbol: ${asset.symbol}`\n    );\n  }\n\n  if (seenSymbols.has(asset.symbol)) {\n    throw new Error(\n      `Duplicate ETF symbol: ${asset.symbol}`\n    );\n  }\n\n  seenSymbols.add(asset.symbol);\n\n  if (\n    asset.date !== targetDate ||\n    typeof asset.netFlowUsdM !== 'number' ||\n    !Number.isFinite(asset.netFlowUsdM)\n  ) {\n    throw new Error(\n      `Invalid ETF data for ${asset.symbol}`\n    );\n  }\n}\n\n// BTC and ETH must always exist.\nfor (const symbol of requiredSymbols) {\n  if (!seenSymbols.has(symbol)) {\n    throw new Error(\n      `Required ETF data missing: ${symbol}`\n    );\n  }\n}\n\n// Sort available assets into fixed order.\nconst sortedAssets = [...assets].sort(\n  (a, b) =>\n    displayOrder.indexOf(a.symbol) -\n    displayOrder.indexOf(b.symbol)\n);\n\n// ------------------------------------------\n// 3. DATE FORMAT\n// ------------------------------------------\n\nconst date = new Date(`${targetDate}T12:00:00Z`);\n\nconst formattedDate = date.toLocaleDateString(\n  'en-US',\n  {\n    month: 'short',\n    day: 'numeric',\n    timeZone: 'UTC'\n  }\n);\n\n// ------------------------------------------\n// 4. FLOW FORMAT\n// ------------------------------------------\n\nfunction formatFlow(value) {\n\n  const flow = Number(value);\n\n  if (flow > 0) {\n    return `+$${flow.toFixed(1)}M 🟢`;\n  }\n\n  if (flow < 0) {\n    return `-$${Math.abs(flow).toFixed(1)}M 🔴`;\n  }\n\n  return '$0.0M ⚪';\n}\n\n// ------------------------------------------\n// 5. DAILY ETF LINES\n// ------------------------------------------\n\nconst lines = sortedAssets.map(asset => {\n\n  const name = displayNames[asset.symbol];\n\n  return `${name}: ${formatFlow(asset.netFlowUsdM)}`;\n});\n\n// No Total Net Flow calculation.\n\nconst baseTweet =\n`Crypto ETF Flows — ${formattedDate}\n\n${lines.join('\\n')}`;\n\n// ------------------------------------------\n// 6. HISTORICAL CONTEXT\n// ------------------------------------------\n\nconst historicalLines = ['BTC', 'ETH']\n  .map(symbol =>\n    historicalTweetContext[symbol]?.historicalText\n  )\n  .filter(Boolean);\n\nlet tweetText = baseTweet;\n\nif (historicalLines.length > 0) {\n\n  tweetText += `\n\n${historicalLines.join('\\n')}`;\n}\n\n// ------------------------------------------\n// 7. COMPACT HISTORICAL FALLBACK\n// ------------------------------------------\n\nif (tweetText.length > 280) {\n\n  const compactHistoricalLines = [];\n\n  for (const symbol of ['BTC', 'ETH']) {\n\n    const text =\n      historicalTweetContext[symbol]?.historicalText;\n\n    if (!text) continue;\n\n    const streakMatch = text.match(\n      /(\\d+) consecutive days of (inflows|outflows)/\n    );\n\n    const flowMatch = text.match(\n      /5-day net flow (?:to|stands at) ([+-]?\\$[\\d.]+[BM]|\\$0)/\n    );\n\n    const parts = [];\n\n    if (streakMatch) {\n\n      const days = streakMatch[1];\n\n      const direction =\n        streakMatch[2] === 'inflows'\n          ? 'inflow'\n          : 'outflow';\n\n      parts.push(`${days}d ${direction} streak`);\n    }\n\n    if (flowMatch) {\n      parts.push(`5D ${flowMatch[1]}`);\n    }\n\n    if (parts.length > 0) {\n\n      compactHistoricalLines.push(\n        `${symbol}: ${parts.join(' | ')}`\n      );\n    }\n  }\n\n  if (compactHistoricalLines.length > 0) {\n\n    tweetText =\n`${baseTweet}\n\n${compactHistoricalLines.join('\\n')}`;\n  }\n}\n\n// ------------------------------------------\n// 8. FINAL TWEET SAFETY\n// ------------------------------------------\n\nif (tweetText.length > 280) {\n  throw new Error(\n    `Tweet exceeds 280 characters (${tweetText.length}).`\n  );\n}\n\n// ------------------------------------------\n// 9. OUTPUT\n// ------------------------------------------\n\nreturn [{\n  json: {\n    targetDate,\n    assets: sortedAssets,\n    assetCount: sortedAssets.length,\n    missingOptionalAssets:\n      displayOrder\n        .filter(symbol =>\n          !requiredSymbols.includes(symbol) &&\n          !seenSymbols.has(symbol)\n        ),\n    historicalTweetContext,\n    tweetLength: tweetText.length,\n    tweetText\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4800,
+        256
+      ],
+      "id": "3d87e55e-fae0-44f9-bab6-a85cef6edbc7",
+      "name": "Prepare Daily ETF Tweet"
+    },
+    {
+      "parameters": {
+        "text": "={{$json.tweetText}}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.twitter",
+      "typeVersion": 2,
+      "position": [
+        5040,
+        256
+      ],
+      "id": "bd64e3c1-86e3-4939-9377-4d724270e40a",
+      "name": "Post Daily ETF Flows to X",
+      "credentials": {
+        "twitterOAuth2Api": {
+          "id": "",
+          "name": "X account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "value": "YOUR_ETF_FLOW_PUBLISH_STATE_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "ETF Flow Publish State"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyValue": "1"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lastPublishedDate": "={{ $('Prepare Daily ETF Tweet').item.json.targetDate }}"
+          },
+          "matchingColumns": [
+            "lastPublishedDate"
+          ],
+          "schema": [
+            {
+              "id": "lastPublishedDate",
+              "displayName": "lastPublishedDate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        5312,
+        256
+      ],
+      "id": "49fbe52e-d3b4-49b5-b533-cc8088f7af4a",
+      "name": "Update Last Published ETF Date"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n // ==========================================\n // FYNBEAT — BUILD SUMMARY ETF DATASET V2\n // BTC + ETH REQUIRED\n // NO TOTAL NET FLOW\n // ==========================================\n\n const tradingData =\n   $('Build Final ETF Dataset').first().json;\n\n const targetDate = tradingData.targetDate;\n const assets = tradingData.assets;\n\n const REQUIRED = ['BTC', 'ETH'];\n const OPTIONAL = [];\n const ALLOWED = [...REQUIRED, ...OPTIONAL];\n\n // ==========================================\n // DATASET VALIDATION\n // ==========================================\n\n if (\n   typeof targetDate !== 'string' ||\n   !/^\\d{4}-\\d{2}-\\d{2}$/.test(targetDate)\n ) {\n   throw new Error('Invalid ETF targetDate.');\n }\n\n if (!Array.isArray(assets)) {\n   throw new Error('Final ETF assets array missing.');\n }\n\n const seen = new Set();\n\n for (const asset of assets) {\n   if (!ALLOWED.includes(asset.symbol)) {\n     throw new Error(\n       `Unexpected ETF symbol: ${asset.symbol}`\n     );\n   }\n\n   if (seen.has(asset.symbol)) {\n     throw new Error(\n       `Duplicate ETF symbol: ${asset.symbol}`\n     );\n   }\n\n   seen.add(asset.symbol);\n\n   if (\n     asset.date !== targetDate ||\n     typeof asset.netFlowUsdM !== 'number' ||\n     !Number.isFinite(asset.netFlowUsdM)\n   ) {\n     throw new Error(\n       `Invalid ETF data for ${asset.symbol}`\n     );\n   }\n }\n\n // ==========================================\n // REQUIRED ASSET CHECK\n // ==========================================\n\n const readySymbols = assets.map(a => a.symbol);\n\n const missingRequiredSymbols = REQUIRED.filter(\n   symbol => !readySymbols.includes(symbol)\n );\n\n const missingOptionalSymbols = OPTIONAL.filter(\n   symbol => !readySymbols.includes(symbol)\n );\n\n if (missingRequiredSymbols.length > 0) {\n   throw new Error(\n     `Mandatory ETF assets missing: ${missingRequiredSymbols.join(', ')}`\n   );\n }\n\n // ==========================================\n // OUTPUT\n // ==========================================\n\n const allAssetsResolved =\n   missingRequiredSymbols.length === 0;\n\n const allAssetsReady =\n   missingOptionalSymbols.length === 0;\n\n return [{\n   json: {\n     targetDate,\n     assets,\n     assetCount: assets.length,\n\n     // True when BTC and ETH are ready\n     allAssetsResolved,\n\n     missingAssets: [\n       ...missingRequiredSymbols,\n       ...missingOptionalSymbols\n     ],\n\n     finalDatasetSource:\n       tradingData.finalDatasetSource,\n\n     validation: {\n       ...tradingData.validation,\n       requiredAssetsReady: true,\n       allAssetsReady,\n       missingRequiredSymbols,\n       missingOptionalSymbols\n     }\n   }\n }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2080,
+        256
+      ],
+      "id": "61e980ce-2b43-4622-9274-8625a336b6cc",
+      "name": "Build Summary ETF Dataset"
+    },
+    {
+      "parameters": {
+        "jsCode": "const assets = $json.assets ?? [];\n\nconst tracked = assets.filter(asset =>\n  ['BTC', 'ETH'].includes(asset.symbol)\n);\n\nreturn tracked.map(asset => ({\n  json: {\n    date: asset.date,\n    symbol: asset.symbol,\n    netFlow: asset.netFlowUsdM,\n    direction:\n      asset.netFlowUsdM > 0\n        ? 'inflow'\n        : asset.netFlowUsdM < 0\n          ? 'outflow'\n          : 'flat'\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2576,
+        256
+      ],
+      "id": "9a9141c9-4fbc-400a-bb4a-3a8682e0def0",
+      "name": "Prepare BTC & ETH History Records"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "YOUR_ETF_FLOW_HISTORY_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "ETF Flow History"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "date",
+              "keyValue": "={{$json.date}}"
+            },
+            {
+              "keyName": "symbol",
+              "keyValue": "={{$json.symbol}}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "date": "={{$json.date}}",
+            "symbol": "={{$json.symbol}}",
+            "direction": "={{$json.direction}}",
+            "netFlow": "={{$json.netFlow}}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "date",
+              "displayName": "date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "symbol",
+              "displayName": "symbol",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "direction",
+              "displayName": "direction",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "netFlow",
+              "displayName": "netFlow",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2912,
+        256
+      ],
+      "id": "2b1b7ffe-b532-4420-865f-5fc79c39a2c2",
+      "name": "Save BTC & ETH Flow History"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: {} }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3200,
+        256
+      ],
+      "id": "8a6a90f3-56e7-45aa-a816-346226af0d0b",
+      "name": "Trigger History Read Once"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "YOUR_ETF_FLOW_HISTORY_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "ETF Flow History"
+        },
+        "returnAll": true,
+        "orderBy": true,
+        "orderByColumn": "date"
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        3440,
+        256
+      ],
+      "id": "87eb2752-937d-40c5-9ea6-8dbf48c60629",
+      "name": "Get BTC & ETH Flow History"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(item => item.json);\n\nconst symbols = ['BTC', 'ETH'];\nconst results = [];\n\nfor (const symbol of symbols) {\n  // Bu asset'in kayıtlarını al ve en yeni trading day önce olacak şekilde sırala\n  const history = rows\n    .filter(row => row.symbol === symbol)\n    .sort((a, b) => b.date.localeCompare(a.date));\n\n  if (history.length === 0) {\n    results.push({\n      json: {\n        symbol,\n        historyDays: 0,\n        streak: 0,\n        streakDirection: null,\n        showStreak: false,\n        fiveDayNetFlow: null,\n        show5DayFlow: false,\n      }\n    });\n    continue;\n  }\n\n  // En güncel günün yönü\n  const currentDirection = history[0].direction;\n\n  // Consecutive streak\n  let streak = 0;\n\n  for (const row of history) {\n    if (row.direction === currentDirection) {\n      streak++;\n    } else {\n      break;\n    }\n  }\n\n  // Son 5 trading day\n  const lastFive = history.slice(0, 5);\n\n  const hasFiveDays = lastFive.length === 5;\n\n  const fiveDayNetFlow = hasFiveDays\n    ? lastFive.reduce((sum, row) => sum + Number(row.netFlow), 0)\n    : null;\n\n  results.push({\n    json: {\n      symbol,\n      latestDate: history[0].date,\n      latestNetFlow: Number(history[0].netFlow),\n      latestDirection: currentDirection,\n\n      historyDays: history.length,\n\n      streak,\n      streakDirection: currentDirection,\n      showStreak: streak >= 3,\n\n      fiveDayNetFlow: hasFiveDays\n        ? Number(fiveDayNetFlow.toFixed(1))\n        : null,\n      show5DayFlow: hasFiveDays,\n    }\n  });\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3760,
+        256
+      ],
+      "id": "fed000e5-389a-4d16-a314-ae749aa95174",
+      "name": "Calculate ETF Historical Context"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all().map(item => item.json);\n\nconst context = {};\n\nfor (const item of items) {\n  context[item.symbol] = {\n    historyDays: item.historyDays,\n\n    streak: {\n      days: item.streak,\n      direction: item.streakDirection,\n      show: item.showStreak\n    },\n\n    fiveDay: {\n      netFlowUsdM: item.fiveDayNetFlow,\n      show: item.show5DayFlow\n    }\n  };\n}\n\nreturn [\n  {\n    json: {\n      historicalContext: context\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4032,
+        256
+      ],
+      "id": "5fc91144-6174-4625-89af-de63bd16a3bc",
+      "name": "Build Historical Context Object"
+    },
+    {
+      "parameters": {
+        "jsCode": "const historicalContext =\n  $('Build Historical Context Object').first().json.historicalContext;\n\nconst dailyDataset =\n  $('Preserve ETF Daily Dataset').first().json;\n\nreturn [{\n  json: {\n    ...dailyDataset,\n    historicalContext\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4320,
+        256
+      ],
+      "id": "a0bf9bcf-fef3-4d88-99ae-3e0d0de88785",
+      "name": "Attach Historical Context to ETF Dataset"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst context = data.historicalContext ?? {};\n\nconst results = {};\n\nfunction formatFlow(valueM) {\n  const abs = Math.abs(valueM);\n\n  if (abs >= 1000) {\n    return `$${(abs / 1000).toFixed(2)}B`;\n  }\n\n  return `$${abs.toFixed(1)}M`;\n}\n\nfunction signedFlow(valueM) {\n  if (valueM > 0) {\n    return `+${formatFlow(valueM)}`;\n  }\n\n  if (valueM < 0) {\n    return `-${formatFlow(valueM)}`;\n  }\n\n  return '$0';\n}\n\nfor (const symbol of ['BTC', 'ETH']) {\n  const assetContext = context[symbol];\n\n  if (!assetContext) {\n    results[symbol] = {\n      historicalText: null\n    };\n    continue;\n  }\n\n  const streak = assetContext.streak;\n  const fiveDay = assetContext.fiveDay;\n\n  // Only inflow/outflow streaks are valid.\n  // \"flat\" (0 flow) must never create a streak message.\n  const showStreak =\n    streak?.show === true &&\n    ['inflow', 'outflow'].includes(streak?.direction);\n\n  const showFiveDay =\n    fiveDay?.show === true &&\n    fiveDay.netFlowUsdM !== null;\n\n  let historicalText = null;\n\n  // ========================================\n  // STREAK + 5-DAY\n  // ========================================\n\n  if (showStreak && showFiveDay) {\n    const directionText =\n      streak.direction === 'inflow'\n        ? 'inflows'\n        : 'outflows';\n\n    historicalText =\n      `${symbol} has now recorded ${streak.days} consecutive days of ${directionText}, ` +\n      `bringing its 5-day net flow to ${signedFlow(fiveDay.netFlowUsdM)}.`;\n  }\n\n  // ========================================\n  // STREAK ONLY\n  // ========================================\n\n  else if (showStreak) {\n    const directionText =\n      streak.direction === 'inflow'\n        ? 'inflows'\n        : 'outflows';\n\n    historicalText =\n      `${symbol} has now recorded ${streak.days} consecutive days of ${directionText}.`;\n  }\n\n  // ========================================\n  // 5-DAY ONLY\n  // ========================================\n\n  else if (showFiveDay) {\n    historicalText =\n      `${symbol}'s 5-day net flow stands at ${signedFlow(fiveDay.netFlowUsdM)}.`;\n  }\n\n  results[symbol] = {\n    historicalText\n  };\n}\n\nreturn [\n  {\n    json: {\n      ...data,\n      historicalTweetContext: results\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4560,
+        256
+      ],
+      "id": "30b74341-1397-46e2-9f43-5343dd6669d7",
+      "name": "Prepare Historical ETF Context"
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2336,
+        256
+      ],
+      "id": "deb533d3-40a8-4e52-96f0-0510ab108893",
+      "name": "Preserve ETF Daily Dataset"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $json;\n\nconst targetDate =\n  data.publishCheck?.targetDate;\n\nconst assets =\n  data.assets || [];\n\n// CryptoETF artık final dataset kaynağı değil.\n// Buradaki görevi güvenilir bir ETF targetDate sağlamaktır.\n\nconst readyAssets = assets.filter(\n  asset => asset.date === targetDate\n);\n\nconst pendingAssets = assets\n  .filter(asset => asset.date !== targetDate)\n  .map(asset => ({\n    symbol: asset.symbol,\n    lastAvailableDate: asset.date\n  }));\n\n// Final BTC/ETH doğrulaması SoSoValue/Farside tarafında yapılır.\n// Burada yalnızca geçerli bir targetDate olması yeterli.\nconst shouldContinue =\n  typeof targetDate === 'string' &&\n  /^\\d{4}-\\d{2}-\\d{2}$/.test(targetDate);\n\nreturn [\n  {\n    json: {\n      ...data,\n\n      assets,\n\n      publishCheck: {\n        ...data.publishCheck,\n\n        targetDate,\n        readyAssets,\n        pendingAssets,\n\n        readyCount: readyAssets.length,\n        totalTracked: 2,\n\n        shouldContinue,\n\n        reason: shouldContinue\n          ? 'TARGET_DATE_READY_FOR_SURF_FINAL_CHECK'\n          : 'NO_VALID_TARGET_DATE'\n      },\n\n      finalDatasetSource: 'CRYPTOETF_TARGET_DATE'\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -864,
+        16
+      ],
+      "id": "3e17020d-49cb-4304-be71-6c3d4412428d",
+      "name": "Prepare Final ETF Dataset"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "375c3e09-ef92-40ee-81c4-9e0d06b5061a",
+              "leftValue": "={{ $json.publishCheck.shouldContinue }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -336,
+        16
+      ],
+      "id": "3b932eb1-b1fa-420d-a263-6a7ebaf5b383",
+      "name": "Final ETF Dataset Ready?"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtDay": [
+                6
+              ],
+              "triggerAtHour": 18
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -880,
+        2288
+      ],
+      "id": "ae13bb99-27cc-4e2a-948c-e4af3188b2ce",
+      "name": "Weekly ETF Report Schedule"
+    },
+    {
+      "parameters": {
+        "url": "https://api.cryptoetf.today/api/v1/flows/btc",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_CRYPTOETF_API_KEY"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -672,
+        2288
+      ],
+      "id": "61706bc9-fa82-4b01-a9fb-f05f4ec469b7",
+      "name": "Get BTC Daily Flow History"
+    },
+    {
+      "parameters": {
+        "url": "https://api.cryptoetf.today/api/v1/flows/eth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_CRYPTOETF_API_KEY"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -464,
+        2288
+      ],
+      "id": "8b12b098-90f5-41dd-811b-25451ed06c12",
+      "name": "Get ETH Daily Flow History"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// BUILD WEEKLY BTC & ETH DATASET\n// TEMP TEST MODE: 2026-08-31 → 2026-09-04\n// Grafik testi tamamlanınca current-week moduna döneceğiz.\n// ==========================================\n\n// BTC ve ETH historical verilerini ilgili node'lardan al\nconst btc = $('Get BTC Daily Flow History').first().json;\nconst eth = $('Get ETH Daily Flow History').first().json;\n\n\n// ------------------------------------------\n// ISTANBUL DATE SETUP\n// ------------------------------------------\n\nconst now = new Date();\n\nconst istanbulParts = new Intl.DateTimeFormat('en-CA', {\n  timeZone: 'Europe/Istanbul',\n  year: 'numeric',\n  month: '2-digit',\n  day: '2-digit',\n}).formatToParts(now);\n\nconst year = Number(\n  istanbulParts.find(p => p.type === 'year').value\n);\n\nconst month = Number(\n  istanbulParts.find(p => p.type === 'month').value\n);\n\nconst day = Number(\n  istanbulParts.find(p => p.type === 'day').value\n);\n\n// UTC kullanarak date hesaplamalarını stabil tutuyoruz\nconst today = new Date(\n  Date.UTC(year, month - 1, day)\n);\n\n\n// ------------------------------------------\n// NORMAL PRODUCTION WEEK CALCULATION\n// Şimdilik hesaplanıyor fakat aşağıda test\n// tarihleri kullanılıyor.\n// ------------------------------------------\n\nconst dayOfWeek = today.getUTCDay(); // Sun=0 ... Sat=6\n\nconst daysSinceMonday = (dayOfWeek + 6) % 7;\n\nconst monday = new Date(today);\n\nmonday.setUTCDate(\n  today.getUTCDate() - daysSinceMonday\n);\n\nconst friday = new Date(monday);\n\nfriday.setUTCDate(\n  monday.getUTCDate() + 4\n);\n\nconst iso = (d) =>\n  d.toISOString().slice(0, 10);\n\n\n// ------------------------------------------\n// TEMP TEST WEEK\n// ------------------------------------------\n\n// PRODUCTION: current week Monday -> Friday\nconst mondayStr = iso(monday);\nconst fridayStr = iso(friday);\n\n\n// ------------------------------------------\n// FILTER MONDAY → FRIDAY\n// ------------------------------------------\n\nconst filterWeek = (days) =>\n  days.filter(\n    d =>\n      d.date >= mondayStr &&\n      d.date <= fridayStr\n  );\n\nconst btcWeek = filterWeek(btc.days);\nconst ethWeek = filterWeek(eth.days);\n\n\n// ------------------------------------------\n// WEEKLY NET FLOW CALCULATION\n// ------------------------------------------\n\nconst btcWeeklyNet = btcWeek.reduce(\n  (sum, d) =>\n    sum + Number(d.netFlowUsdM || 0),\n  0\n);\n\nconst ethWeeklyNet = ethWeek.reduce(\n  (sum, d) =>\n    sum + Number(d.netFlowUsdM || 0),\n  0\n);\n\n\n// ------------------------------------------\n// OUTPUT\n// ------------------------------------------\n\nreturn [\n  {\n    json: {\n\n      week: {\n        monday: mondayStr,\n        friday: fridayStr,\n      },\n\n      btc: {\n        symbol: 'BTC',\n        days: btcWeek,\n        weeklyNetUsdM:\n          Math.round(btcWeeklyNet * 10) / 10,\n      },\n\n      eth: {\n        symbol: 'ETH',\n        days: ethWeek,\n        weeklyNetUsdM:\n          Math.round(ethWeeklyNet * 10) / 10,\n      },\n\n      validation: {\n\n        btcDaysFound:\n          btcWeek.length,\n\n        ethDaysFound:\n          ethWeek.length,\n\n        fridayBTCReady:\n          btcWeek.some(\n            d => d.date === fridayStr\n          ),\n\n        fridayETHReady:\n          ethWeek.some(\n            d => d.date === fridayStr\n          ),\n      },\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -256,
+        2288
+      ],
+      "id": "4809bfa2-62cf-4c5d-8f8e-47d3097b2b73",
+      "name": "Build Weekly BTC & ETH Dataset"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "446b78a5-26fe-4074-a18d-a7dee719b29e",
+              "leftValue": "={{ $json.validation.fridayBTCReady }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "a38bca1a-3655-447c-9379-40cb4cba9649",
+              "leftValue": "={{ $json.validation.fridayETHReady }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -48,
+        2288
+      ],
+      "id": "a3ac04cc-0040-4d83-be48-46765a6c8071",
+      "name": "Is Weekly ETF Data Ready?"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// PREPARE WEEKLY ETF GRAPHIC\n// FynBeat Weekly BTC & ETH ETF Report\n// ==========================================\n\n// Weekly dataset'i doğrudan ana dataset node'undan al.\n// Böylece aradaki IF / Data Table node'larının output'una\n// bağımlı kalmayız.\nconst data =\n  $('Build Weekly BTC & ETH Dataset').first().json;\n\n// ------------------------------------------\n// HELPERS\n// ------------------------------------------\n\nconst formatFlow = (value) => {\n  const n = Number(value);\n\n  const sign = n > 0 ? '+' : n < 0 ? '-' : '';\n  const abs = Math.abs(n);\n\n  if (abs >= 1000) {\n    return `${sign}$${(abs / 1000).toFixed(2)}B`;\n  }\n\n  return `${sign}$${abs.toFixed(1)}M`;\n};\n\nconst formatDate = (dateString) => {\n  const date = new Date(`${dateString}T00:00:00Z`);\n\n  return new Intl.DateTimeFormat('en-US', {\n    month: 'short',\n    day: 'numeric',\n    timeZone: 'UTC',\n  }).format(date);\n};\n\nconst iso = (date) =>\n  date.toISOString().slice(0, 10);\n\n// ------------------------------------------\n// EXPECTED MONDAY → FRIDAY DATES\n// ------------------------------------------\n\nconst monday =\n  new Date(`${data.week.monday}T00:00:00Z`);\n\nconst expectedDays = [\n  'MON',\n  'TUE',\n  'WED',\n  'THU',\n  'FRI',\n].map((day, index) => {\n\n  const date = new Date(monday);\n\n  date.setUTCDate(\n    monday.getUTCDate() + index\n  );\n\n  return {\n    day,\n    date: iso(date),\n  };\n});\n\n// ------------------------------------------\n// BUILD DAILY DATA SAFELY\n// ------------------------------------------\n\nconst chartData = expectedDays.map(expected => {\n\n  const btc = data.btc.days.find(\n    item => item.date === expected.date\n  );\n\n  const eth = data.eth.days.find(\n    item => item.date === expected.date\n  );\n\n  // Eksik gün varsa grafik oluşturma.\n  // Missing data hiçbir zaman 0 kabul edilmez.\n  if (!btc || !eth) {\n    throw new Error(\n      `Weekly ETF data incomplete for ${expected.date}`\n    );\n  }\n\n  // Gerçek 0 geçerlidir.\n  // Sadece null / undefined eksik veri sayılır.\n  if (\n    btc.netFlowUsdM === null ||\n    btc.netFlowUsdM === undefined ||\n    eth.netFlowUsdM === null ||\n    eth.netFlowUsdM === undefined\n  ) {\n    throw new Error(\n      `Weekly ETF flow missing for ${expected.date}`\n    );\n  }\n\n  return {\n    day: expected.day,\n    date: expected.date,\n\n    btc: Number(btc.netFlowUsdM),\n    eth: Number(eth.netFlowUsdM),\n\n    btcDisplay:\n      formatFlow(btc.netFlowUsdM),\n\n    ethDisplay:\n      formatFlow(eth.netFlowUsdM),\n  };\n});\n\n// ------------------------------------------\n// DATE RANGE\n// ------------------------------------------\n\nconst dateRange =\n  `${formatDate(data.week.monday)} – ${formatDate(data.week.friday)}`;\n\n// ------------------------------------------\n// OUTPUT\n// ------------------------------------------\n\nreturn [\n  {\n    json: {\n\n      report: {\n        title: 'WEEKLY CRYPTO ETF FLOWS',\n        dateRange,\n      },\n\n      chartData,\n\n      btc: {\n        weeklyNetUsdM:\n          data.btc.weeklyNetUsdM,\n\n        weeklyNetDisplay:\n          formatFlow(\n            data.btc.weeklyNetUsdM\n          ),\n      },\n\n      eth: {\n        weeklyNetUsdM:\n          data.eth.weeklyNetUsdM,\n\n        weeklyNetDisplay:\n          formatFlow(\n            data.eth.weeklyNetUsdM\n          ),\n      },\n\n      branding: {\n        brand: 'FynBeat',\n        footer:\n          'Spot ETF Flow Intelligence',\n      },\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        1984
+      ],
+      "id": "778d77c6-79b0-4d1c-9898-045d1ae9d62c",
+      "name": "Prepare Weekly ETF Graphic"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://hcti.io/v1/image",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"html\": $json.render.html,\n    \"css\": $json.render.css\n  }\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1024,
+        1984
+      ],
+      "id": "6278b98b-d528-4835-8bb0-bc133edde77c",
+      "name": "Render Weekly ETF Graphic",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "",
+          "name": "HTML/CSStoimage"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// FYNBEAT — WEEKLY CRYPTO ETF FLOWS\n// PREMIUM TEMPLATE V3\n// ============================================================\n\nconst data = $input.first().json;\nconst fynbeatLogo = `data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAcFBQYFBAcGBgYIBwcICxILCwoKCxYPEA0SGhYbGhkWGRgcICgiHB4mHhgZIzAkJiorLS4tGyIyNTEsNSgsLSz/2wBDAQcICAsJCxULCxUsHRkdLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCz/wgARCADcANwDASIAAhEBAxEB/8QAGwAAAgMBAQEAAAAAAAAAAAAAAAUCAwQBBgf/xAAZAQADAQEBAAAAAAAAAAAAAAAAAQIDBAX/2gAMAwEAAhADEAAAAfmwAAAAAAbEY7GNecyMfUtZmrDaYOhuhik3UNOjVE4aMAYAAAAAAAAStY5rma5hjmr02jrMyS2s3KO8o5bo0JKutYJLqWGey+GWZeYbKaYBbAAAALqXOarWmxTr0xnhJTWsurqems824m0vti+7N6K88iZZr6qnNXd7Mvxe76Z8lzeYZLeqgCmBejet2Ys57qyycteMdHLCDI/1WeV5bXs7XGXVjUMe6tGO3tNSUxjoH0NBHln0HzScejXdmpa3SkDVjVU0ylb3ltqPpBxxZrFRmct5YXRc/IfREkJHqU29Nb6iuZlOj2ucqvP+la51h8MT6q4y56CI8Puw86d7amitDDJuzwrPSKKcc21ymOMUV1ZuzXVTHTTf2LNnFlNdgr6dNsfa2cuS1E68jo4acl/VrU71X82M6KqM8kMZQ9DtaK2azMZ0aKJlgo14hbmSNnnKfjDD0adI6AYb17riw8l6zenTV7UHOq5w6+ZlZ9wc+GqrNXRfTVXpWauXN+liu2UQbs+iGcU9lrJwd0VVU7m2ziyTpbX+95WcvL4Z3YJy7dKtnJCa58FeeezPRHS7408qrIw46gBem3PtXZpr2qGWe2tV1m+v7st2v4337D8uBIVgb5rewtc8nu8p84fRM/I/muT698f6n0idT6cA7w9DB5005rpktZrM11ksaCVtVXrda+lfNPaIkeZ9j4H6cz5Z7uSMPYXYPKhY+XsPOywwTtsZmZHkLnmGuS62NEO6Er9t4J4xX5QY+nrJZOFsvoKN3sPKwgb+Xtq0Z7/xvvQPNpqA9Vq8TYD9t4azkx9Nq8fXlLlv4u7Sn+NbRb9hZ5KOMb/ReJv0ruwW66RA2oAAcJ5QuatilGremnbaQwjNulQAymr0Bqhg6GvQn6DTmCoG2bJwLZncZhlDVgDYAAAHWqkhXU7rZSwlHSgBgAAAIAADXJkYzXwr8gWwCmAAAAAAAAAAwktM0xx1bEsfWPJS7rAbrtw1sZZKCmAWwAAAAAP/xAAwEAACAgIBAgQFAwQDAQAAAAACAwEEAAUREhMQFCEiBhUgIzAkMTQWJTI1QEFCQ//aAAgBAQABBQL8ILNheRMc7dQM66cZ36+d6tnVTLOxXPCoviP+Cmqx0fpU4dtxjAEWdss7R8dMx4cZxgkQF5yTzy6n4YEsvyCMmXbTVxrHWChPt7YBLjYBxE9JMAYM5Mh557TJgY9/RM50ZI8YFrkW1uA/ElJvZLRRCgGMjHNMBECmCMpa58swSkM4ksrwHK2EU9MDk+uTGTkximmgyUFkPwKUTmOaKl4se2GfvjGEOMnqZ4KOSwUiIRERE5OThZOTiu5DGgNpf1s/RpyuPJ+ucY5krzj6PtiHUcRDo6e1yR/488wWcczS0BHFhCKOsW0kusqGR+mtEIVM8ziJ4JhwuFSxuFUeI+ILlmcREGInEV44FfbIp4znmJz/AL1kFTo7K+FnS5UaIk5RJd4pVLnWmwxnhH7jU5h1o1wtzQJiR2GEMhOI47U5M+sz6H7h6uRPgcEuc1NDzDdtsPMs6p48D/UUvFP2KfjRqdsZeZFJdc9A1sXPXmxR5ivOJZ6TPpzkzkziK5vdtNT5VdKsdmzs7QU63OLXLnWtcyorKbICw1cqb4XfaeCMlKKXl8tPKAIsA+loNCNiR1qohfx2vS1ExIytZumZyZyIkpVA6qhrNjDWGK9JWM5YYATcrqNV3cTzT8Ln3ByiMFbMpM1I6hCQpY10tfYmCYftNLenD64kPUujtJrMmA+aMOH3DbFVLHmUSM6uoObG6VyxE8S+y2xMDJZquQ2OwL+47M+qt4B9zW5W9tZAQZq5s2O7MsrHwbmFBNPq8P8AzX7fWizPbpthLCL2xElKOjT1LGvG47b3BES8Foa2NRyuwZf3u6XNy4XKfCl6zg+mrQXBdXZpQWKKFpLhiOOC/fB9M44mqOXy4XOausKl27Z2bNfZtrVyOSL98r0GWFasulSD4vkX9zsF+osF9vw1/wDPn95/1f8Agl/ORxzH25rkIDZgCiMnmcX7oXblOdmbtg9ci2e0uCXjxgVUzToM6atQ+kVl+pkv1bS5a2eQ58Kf85vo6f8AVqjlr2Sxwr4xg8ZHV5fskSU1+IkI4/8At0R1WmxTrruOSMzzMeuNr9oHs5piz9JXPpUkuIEvuzP3jn3FPp4U/W831aHu1qfZihwQ5w/uNa6JlVcjQVQhxjTZNWpMK7iq8MKSKI5njoY44nHs6gNnKoP7YlwIzkT7v/U/vPjQ/nT+9T3JkPbPbXJW4jOm1JeWfGSmzOF5oF85BFEw8hjugyWQQkmu20c6q9k6q9j6z6+f9fgqekZQOBusacMmZnI55XA1afzvXZO810RtNqzYu+iCz4cH0tbatTave02t2vQWr+rX6kr6rCuxYyPt67I9Ju+5uaxXe2mxBtjX/wBOXst6mxRUzUUT0lZB2rO31+u11D+nqc0labUTm81a9e3TD2tbe1bLlupp+xZ3V8OzS1CBQNLVnO2oLqFRoUZpRr9aeWtcpOyrgmsnbqqLXl32F4L+9Tz4dXzsdjtY18f1RGXLjbr9Izv6T4dpdmH2fm2++JLMjr/h4OrbfE7up6yhNf51ZyhsG2S2AC29ZEbKUa+uh+1KbLx1VcRq069d24Z3bltnZ1mUxjukUmfglspdaVC2fD4dNffN673h8OO+1ursV6eiX1bH4hd12fh4OkNgXmN7M9Q+Sr4Arrh5oT2dlI2YjWryn0L2FmvFmayRrjJwezsL763BC32PsI+iuUOWNu1VhjDczKiYfaGaGuG3ZK3ZBrFYZkwge1cdZdffdnfdhGZ+EOYMS5s+HebxDWDGQ5sRXjtCRSRfT/OXkVmFEInzB0hkvlroiaJgTqRV0/LZlo0C6D109fyxvI69hEmp3kVqQsz5a7qXWV52NeTIdTYgSQYRXT3Ze7vH9QlIlIxdjIniesslzZjvN4JrGZ3WZLmzirjlZ3mZ32xkGUR3Die+2M6y6u4eEwyhCJbj3wcfgieJ6128Yo0n+ZdeBB1iW/kXZkQ8sLskZGfxKrMbHWmvhsJh/mi4fHTVbnkmzhrNf0hUeeeWAM7yFY17HT/wwt2Azzrs85OecLPPWODYbPyf/8QAJxEAAgIBAwIFBQAAAAAAAAAAAAECERAgITESQQMTIjBRMkBCUnH/2gAIAQMBAT8B0WXovXZemxPU8LK0Xrui7zeeRLLw2JDReX8YSoc/UlhYkV2IoexW+GyKNuSU+Yi/HQkSXc7Yd8l2dI5KJNtqSK3f8IrjHfDdbC4HN8H0oXqNkW3QobHTyUJY7jW50FYo6SqwtT1eI6Q+pI6qSFLccl8jfBwhYWmcHI8qT5Y/D/UUX3Z5cqqyULqvtL18+xRuWWblaf/EACoRAAEDBAEDAwQDAQAAAAAAAAEAAhEDEiExExAiQQQgQhQyUWEjMPCB/9oACAECAQE/AepIG1cToLPkq1v+KsH+Khw0VfH3e9zvAUwZUk7Rag2EXHwr0HK2MtTXT7HOjA2osC2mt89HIgqEE+q2mJcqdTm7m+E11wnoTGU0fIo5V40NoVPz0ccoEreUAqv8ruMKjSFIQEe10/no/JDelWtPa1Mpp4jCpVfDkW+VCqPswNrkewcZ2qdMU2p9Uio0DSIuEJhkKe4lPl+Fx5gJrcZWgiwiZQY0ZR9R3Z0qLS48jkY2VUqTcz9Jjfs6NwSEMymDyqjfkE0yJRTpa652ly83Y1cTSLU5wYn3PuBVuf8Aia3XT5rQIRdaIQJOE/1Mdsq7hEuTAapk6QAGlJMIU8K3ahR0+aIN5hcI8qFAUKwKq/iZch6isRIavT1uZs9XvawS5AzlMySU/BDvd689oanj1FOnnSvspta3E7VF55RDiR+1UfMkPKqhz2MBO00cTMmUwQIRE4TD8T7a9A1SDK+me7DnJ/psgsMQhSeQQ9y+mfbZdhVKBdBadIdxj8dXNnI2g67+kkntCAgQPY5sq+37/cSBtdztYQAGB7+MeMLvCL3DYQc46Ch52UGAZ9v/xABBEAABAgMDBwkGBgEDBQAAAAABAAIDERIhMUEEEBMiUWFxICMyM0JSYoGRMHKSocHRFDRTc7HhQCRD8GSDk7Lx/9oACAEBAAY/AvY0saXHYAudfDg+8630WtHiP9xn3VkCI7jE/pflB8ZX5T0iFdXGZwcCtTKZfuNkqmt0jdsM1f4VQk1gve6wBWA5Q7fqt+6pqoZ3WaoVgJXRU6VdyJtJB2hSyhjY42mx3qv9PE1v04lh9cUWvaWkYH2oa0Ek4Bc7KLF7gOq3itedlwlYEHTDp4BSdw4qk0y2YIT+SnUFMrVtUyFJ1isCtvzCHlDdLDw7zeBWlgu0kLbi3j7OhgmVosmM3Gx0Xbw3Lac2qPNB/wDuKo4FCUwFZLzTjstKHfTts1MX8muGZFGLk4pcLXwvqN3sQxgmSvw8Azb239/+s2/PMSpxKJBqz0yFglJSvUhYOWHQ51C0SRjQhTEb1jB/7D2BgN65/WHZ4c09mb+lSBaeTUwBzlzlUjZrWI2zkfVEh29TOGeSD8oNI2YqNomBurKeKERhkQhlEEShvw7p2co5U68WQxv2+Smc3FTlOafRD4SVboT5baeRqqQEgpOXSt2oa/IsRymO809ls71Uw2udIjMYUTqoljt29OhuvbyGw23uKpZ1UMUszhMix5huDO05UBtDe62wKuBE0blzYDMoxFwfwRBEiM08eRJTCssUlpIlkJlpK0cOyE2wKWGcRO3B1XcMPtyIkXtP5tv1/wCb+R+LjM1G9EHtFPiPOsrU0xLYrujD+rlM2yTcrhgzAlE28c1JwuV/IDGYlNiQ9Ztx4psNovQyHJz75zNYL3GSre5htlZmpf1cTUdwTmOvaZZ2QBdCbLzxzSAmVpcpZvbDOPFAO6Qtdu3I70DKYDk5+UjSQ4k5lMi5HFr2siNBRcYcMgi2y9Oi5K82CrRu+ixBXSNLbXHYrM+nf1z+gNifk+U2w438p5BBjROjuCLjiqWNLjuUCthaaheEPfzwo/6jbeIszMq6LdY+VqLje4zVb3CHD7xTWQAdK8aznXtCZDFtTgE62cypItrLasQcUQ+fFbEHYFOc0zpY6zyXP5JAjHa4IDUY0XMhiQRbDbUVIo5VHshQ7eKLj0cApoGI6qQkrASmzErCsl/5ih72d4/SeHetn2zZTE8NPqVrdFtpU3WQ4dp2AbFEebynxMQJDzU+Rzk6cZLQyLhgiXN1W9Lgg0CwKQTS4c/Ew2BQ48DoRL9yGSQOgz5qWabIbnS2KMHWEBT8H0UArzzxoffhn5W/TM7xRAPkUQbiEGi9+sfoiqha4ut3LvKWYzuOYuUKGO4C7Mcsj9Blw2lOiON6fCabHfJVHNWHtA3qIPEspO9T8KhLzzwhtMszP3T/AAEAOk68prPCP4Vqne0ouNoNy0jRSbiFNTVuFykRU3ZsUNtNNLdYzTH5L0QaXfdNyeD1MOwb+RpCDVTO9DiU/wB5Rd6nuTORA98fyn8Uz90/wEwOumnOOKtv2KrslbqrELbTbJTiNmTgpUiWxHR7bJIBrWzkBYFoGHnHdYfonNa6Vdhz1VAojcFLwoJ3FPU0ORA98fyncU7wxB/BTn4tFirOYQrmzVLBJguCYZdlAUlWzlsU5a3alatIGyi3AbN6mTapJuKapKSluznlQz3db0zZRD8NXoUGdp5UnHyClCZZvWlbDdbiGrqYnwrqovwla2mazfOWbVJHBCevuKkIYYeKtElTCYXkW2L8s/0X5Z/oudhOZPaPZR4ndhn52ZmTudqnzsRnquBwV6kE0ONLYTLTwX5pvzU/xTT6rFsJvRbyo8Tg1aOLVVKdgTYYL5uMhNqj14Nn58tz9KGBpldNPhVVUGU8x2xXy8h/9ztjC6MKvPH55snZ4wosKDKt4laV/t/GtJGMMDAVWlHKYUGUTRVg1HYmQWdJ5ktWFOO/VbrH1TRRTFpE3zPmqGtbFd+5MpjoM9HEwOCb4yXJ0XTNANwkmRXxQ6gzkAvwzDNxOtuQiZVaSJynINVLWw3HYHpj4U6H4HBQ35RTW4TtfJSbDY7g9QGA81EOJuVMEBrOlemugy0j3TJDp5mQP0myPHHO+H2oeu3hjmMTuMUPm9IX75L8qfjRixTwGxMhnCcNRMqiX9Fv1Kh/pVhreCbDaZaR1vBB3caSoELutq9U1vcarofoniIGyAwWTDF1/BGG9xa07E2K2ISW7SFAgMMzeuciun6LSQnlxAlfNNYOy1OYO7RmMZ3QhCr7IuNpOdsRt4VTOrfrNUWJ3nSTWdxueNC2EOX4eHY6JswCr7jSVCh91s/VRou2TURg0hvoiDcV1fzRpAY3FNiHoDVCAcSJbF03IgXWhqbNxFKIYZk3qp11aocSLZpzGmYCbk/a6UTjs5JyZ5lO1h2O/taJsR0Ok9FF8R1TjjmYxzg1uJmnPYWtn4qiU6K7G4bFzb3MnsMlU9xcdpKkyK9o3FV1Grautf6rrX+q1nE8TmkIjgOKtiO9c0tI71Vj3DzzSER0uKOVRLZdAHtORJMyeV/1DB8Y++ayn4gmQ32VEXGafo3SDDKZdP8AhTc5gAJB3Sn9lS4iq2wbp/ZFzzbZKXn9lIRGhswLb8Pug9zhSQSJX3H7J9LgGsna7ifspF8MHj8lKpkwJmZuVYeGmogzuUURXUmG6mw8fW5Bs2TInetC4vlTOz3ZoOa5rQR2imFxbrYTVsviCLnGmGzpOVgpY2xrdg5YcDIhVMEso7Te/vG/NMI6xt3qRiPlxUtI6V9613udxK6bvVWxHHzTpOnVttQ5x1l1qHOvsEr1IOICmHGc53qyK+6XSVVRntXTd6oBzyQLplFxNENvSccEIcMUwm3D6n2MwudIhxu/g7j91S9sj7cRcoNDMB2ncEGgUQ29Fow9po4jRFh904cNinkz6vA6x39qThI+zqAkzvOsC5saaJ33CwcAi57i5xxPt6YoEZvj+6se6CfFrBc3TFHgdNa7HN4jk2QnS2ykudyhg3N1iuag1HvRLfkpxHl3+JqxnjzWto3cWBdRA/8AGrIUEf8AbCsiU+6JLXcXcT7T/8QAKRABAAIBAgQHAAMBAQAAAAAAAQARITFBUWFxgRCRobHB0fAgMPHhQP/aAAgBAQABPyH+nrp9M9D3tFs+EIea+J7U49o4PendrSDdfiuQnFfgvqLiERbQekRNf/ClDUh5qXh4zt5Or0lM8tega956ZhEmreU3rUdQjtKiwtE8AAr0SmVuxCdufO5w0tw7Gj0TVqEFJ/a/FqAtZsX/AFwmryPOCLIGGg8jQhigbrMw0DesfJKeIGARQgXWabx0sGgOsTYuBcGkV0uX7MG+vlMKwbwtNARdZQkYULCWvwaOJf8AG4K5B29v6wFo7AcV2I3rSkZ5OH1MzBXG4RIU5gA18UMEwbvWulS+FuA2O0pW9OdWPrrcFwDh+xLrrbThL1uvYdIIbHiW46ZPAHgHdiJqJwTclZl8geryan9N3x0RJaNHd+d9ZfCY1q2XMMc46TOo94AW7blEOtTvVeOVrhJoTeJK563v6SlgF6QPCB6doPEG8xzvZrIJ0F6b6OJt0/mFtEZoA6X8z5eFtr+cwzT6/UFzuHgYV3Wh5Tm2lcpUd5tnMBdvHeOAJbUpX3DX6MLqOOs3b3RoZbGMxrZlBa1IJYBqy/D5plRRzniLxrLazs+ukusKnz/zOX8gQtr2/wAXuqI6KuVfDC8hAdLWNPqUZlrStNpRjebqvOJXigmo4/cxgC8Y4spxgbMhvBo3sDb1hXrXtXLrAFua4RF1jcwmXiQF2kCmQBwzrGKrj+J2/cBGmp/hteDO3OFfZBx6rmHhrkum4HDbPR4HOcmbSiW4blOHtGBpuzzPN7xqyKR1PAhAyW2LDtrLMr/M5rzmYFvUzvBkmd9cShdk8N4otam8tdwL2nKwpHWHkj4cfVc7f7fD+HAvbTf5UeILjckU6eNzeMQXu7EvVRBQNdtUcTY5a9IFEy66W/EthVl0cFx4X0mEzUgYmm/7WOvP6+swfvuZf33NZvSIanBbwjKiU0kBh3ZbV4xjwEV0h0q4b+ARKB6rfs09oH1MXbwC2LaCfXn1NdvA+5NALZjXUPcHAe8QOyu4nZyCo+HUyyUYpWuY6/UClHcYcGzSBTzhhQIrWnaX5tjIpzbzZq7JGo6sXB4wLcqvG+/Scr95SpgxuRXSeqMdc1XRbx7zIoNSqriXI8WwkbMFV5lZ5PZjr4cx0+efD38Fb4OLe0V+0LqzCwNcTkG7BgF7shymUAgd5aWWb4x2qPjPOwVslwU8WYNyBW2071LKRnnROqOK9+caIhdYvF4sWhReCOSyQYTiG7hMewxwCNUckVmgF8CPVWcC4LCW8VtM/wAIqHJ7MuzPhzGB0FvU8HOAT2D2GJW9WPVOHeaNAwGHs9oOu2ha0PqKn0uCW0mhymru1zEwQtWcEFTeHHWkY6Q2v3KXlRvDFjTvdSygcRthsLWIGNKqQGe67zC/iU3SuDjfwcCVSi4BJJEdszLk5PfcpTlia+C/0Hgh1mV/4yfM3sIff4hZVNZy0+XnKHmlJHsYGPf0luYFcMxCQZVEIB0oWTXclCGiQytKkbua9GBuDPx7tEtaW8pgkOvwjPUuLa4IdlKtOhT2nMz5S/8APSXNw+5YPEixp60r5gpHCY82MoBMvIOEoWEr9vOIJ0cIuCFYlxdjDVhJyPwmUA3ERWvMRUyz5JbkXJoXLdDG61GtvaOBWc7V8ozh6B6vBV1WW4MCZD6kody6xil+L58K3DhPOI238FSfukNDg/eZ8mMWaVicrjcZi7iPoR7CrNOcyeD2M/EVZbuUFQaC+kVcp4MERaLqgqJXDqNZ9YruZ/y84wsDqESx1gtVx2RbrBMzfolR55KVe74MUJxnk0seXeMUP3SK3xb6zB8X5h8RFkGxbjZLbC0cG1zesw4qq8ebCOhd10RJbGnpA9A1lw9iIt4pswO0sFCWdF+acYicrjKG2u8MgmVzAgKdid3SwvsSiDESgesyEXXFhFjxra0T5C/EV2nXhHY+FmCaC+RGVgGxbUwt5s1hmzvl03AVet+oLTVDXvQEc6svFjxS4ADZuaK9hHT5wXfhKK6sDaIiQRUBtbFcuBxBl5l5jrHxzjbHWnym8Jdf2h9oF6AeBIgqldVjQ1nEDgIbADM/w/pGeALoLPpLu2Gvpzef8BraUa5JV0p7vxDLXDX4hwptAtlBAlDls/mT9SebEMYXayrrwzex7G/ceXgkEwwmgr7XoPhfORR6GX2mgM3AUufScuRlcaC/QIzJc4ZycX1gj6By5wjfmLqb0v8AXNWVZNTi1XXGEUYZb+gxh8outZz4Zlh0UPb4mEbBFgCV51FGXaMdWmuw26y0u8Oo5y3q7lfeIyLC67EAZXnPYxfCPqrgy+8r73k0g5LmRI8Q63ChadE/PizVmBbXW59TXbx59+ts+z2fC6jDPdx9y/FZwYqr7n7v1LeC4DQ8CCpvK/dGUDDK/YP8OzEGNgDlcvfLEw7NuC/eo+xv+VfMp91EdVfE21gPYmfHnfuHxiRNZlSi6ue3+xqqi2DTrG03YUoVbJqxn/IJscVhlmlMiM9IuSUHdz9Q9uEe3gAG7U4uzu1GBsWvF8dbBunR5QLlO3lw6mk4ml2h/wBlUOBO7n68a72RO5T7EJVlqu58/uaRx3hx8z/ZMv8Ak5xA934m7nYgz8wszGmc955vBhL8walZR6OfNlpv2Qt1exEmYZUZq9VBcbQ3J9pf6q/SBUHYjyE1bMJ1/U7D1X+JVLbfldNHlHp5L0U7xwmrW/g+QttTG8ZzDNdCJgnt0GxGFU1XWnVh6Zl+V04StC9nPPnP9jP9jPdPPDlZQUEpZ1+HCPheVA3WhHhSB4BwBGSvOHQ18oiZFq7/AMkynGHD+HqSs1LoKdL5mK1Jg1NbQQC0GGBXRyincRF0MtOfSPl6O5utTStVzhCm/CU53zuUl41nBQtBxM1Qf3KkGnZmjXgX2A2Ma5SagMOlWjRrmPiYLQzqjTmTDAbBAHDrLWLBRjCX4CD7aLZph55IqyMloNxIG5Lrz0OZLK11XM4XLsa8k9mDqHuFyObtHDAK2nC/mmJFiakbGLI4PwWeUSmICImRIGAM1cUtNZYXvr7sWuezS+rrPWEH9rMl5+v9seUFoa1y9XWdRZ3vtiuWiMuK0hjAwc8HCcjCDCgNZTdx6wrUKopYOE7Acs8IGAAGmU0GmrAlKWRovs8ognr9fUf6UJETIkq1+D+F/wBcY8cfHfnz/vUA+T9Fw5sJD5BfZ5/2GNsfdIdcvSem3Z5RuwtRKT+tCAtWp7zbwfhF9XymtkBLf7rqMI5oC06aieSuPVM+kcx8tLy19ItSHOP4AriD3z5R5s/Ke5Y9Z+lrkx53A9A0vQ6G3/juE0BwunlFtHV/xOIvZK/S5OE55Xti1rc5/s//2gAMAwEAAgADAAAAEAAAAFzTS2KigAAAAEm2YNjYrAAwAACsuUuOOuCKmCQABHxU9lk3iRW4AD+e21Ws3X3C9XaHJU3xyBisRg97DoXqwAj7ounf28EHMOd+pt3NCx7vMAW4SZ/h+6rcU/Ig+HtEPDN5bpBOQgRPPAEESvnbK0AAACGmEEEDPDF4QAAAvfvPPff8YwAAAAEAP44i0AAAAP/EACQRAQACAgIBBAIDAAAAAAAAAAEAESExEEEgUWFx8IGRMLHx/9oACAEDAQE/EObrkslkF9Z7vNpM2oS5fpM1FmosH0g34KtRaJlmLUXkkMMKazBVzBvhxPeOSdXcPyQYNRhbzKxcWwn4++0Yyxw3xliLXG6ysogFshmK6ibpLQr6f7KFsYBpmyKyXlYo6iYMzAwRlLDMW7P1M1sTZLmjq5mv7uENpOpsudSDYY3Vyi13LVJVhJfxFR1X9zL7NHDMcF6lekS07mcILc5iVbDo3LlMDNH3j+ybvxKK5NrAbcwiqxMJSngDFyiSpUwb4NrMG/KsPWK86lQHcuqNkykUZCu4dkFES4unxdEaqOBhjKKqosS657WjpKqhbh65S9Qb/hVcECseCXMN+ShuZgKwedOphLGyCdEpbYA8f//EACgRAQACAQIDCQEBAQAAAAAAAAEAESExQWFxgSBRkaGxwdHh8BDxMP/aAAgBAgEBPxD+m2qnvpx5a+NSl7NHrb5wbd8XzO6Xxe7O/PM+K95fTrjqfXUCCJZ2qXXfTi/s+Mcpl732Nv1xBaxFQIWcMtNJm4IzLbHhs/HM63APcmp3dhqar9fT6gE8+LFtbLC0MFRFVUVvcBYDMWWIj2CnRx4P7ECh/ACtCM3qPkbHzxhokSoLjLA3HaQRQy3NMFkVWiasUbzMA6YPPZ9vD+c8ZeR910i1Ocd4RaRgDV325X8yuQrlDKow3WkHsr0/cJUnXdiR5Q0W8U1135mvnAW9qPf3IbE6ben3MTtev6pbWHNKILRvmTTVfucpaOB5SsGXTgQF7qI6cWb6fcrt3fLCdbX4/dzBxL5Y9odPezOcfsdJT7pgXMTwoGG9eBEVGCDFnCINEJXjDO/mCUQYhh8j1fmDRa2+f+wquhACmdYCcGY5Ja7QHovN+CJqMstIwbwivG55k19IaP4ZfI9WUrgeuntBM5wJFsJKR1iMupINxesuGVTKlSx1EAA3nU9eH3c5Iw8n7rpfawzd9P8AYsEAK200jf7kVvrUEFRb6GD3nVhDlrE1Xs66+ZHrRHfv3HtKda++8AK0YheseZs/PHsjSlRzmnWWW4KlxyyuUWu5FRSoRRAgmzzP168v7i4Bp+7n9mNgYTUfxjjC6z/wWszu93rn/XiZaHYHPRN5bAVx2+uuOLBvJ2TbVS8ODv36G3XPDeG0Y7aGX0fGnlK3B8vn0minj9TLh4vxO6HI92/SPbnvcvZ//8QAKRABAAICAgEEAQUBAQEBAAAAAQARITFBUWFxgZGhsRAwwdHwIOFA8f/aAAgBAQABPxD9kMmaR8RK19wf/V5CXCx5B+IMWffvqf5pXs+u/CTjfof5GG13ZZ7K+5Wwvr8f/wCJlI8hR23U9wiiBEwjx/8ACi8aL8Ze3wW+Jpn9ZfAw+r6I2AvD92n7GXvl738RchQtIHVUl5A+oZZ3mEQcEdKVct0xAyWgHomYHUpVVDxQvg8TY40gvX1TbxGYXTaPI/ujGUoQ6ANsMkn5B5Xvdd8Ik3b57aMA9D5moAirrrj5uoJqICiyDfo788QDeogrgaduObhhKqlJbdEYkQ0rasGNesUCjgUgTNiDIarNnV1MGNuqrg2gWPfWIRNXMu1N8PNTOhbkJZWWRmcuAj30PU8DcHKEFoHXJ9OVw8ft5XqVUCyowBlXBGEJIA3fN3PqUYidwcIbPRL0Wd0xlNm1jJgrv17iWGtKgereRrOKZtWJBKE0ta1BqeMufqdHEJFppBH3LBpyLrYMHqxSVs0sgMj64xCB2ZfGaPhmXkXdhV3ReiIxZ3fcPIUSqE+GIBIWAltmE5HDD4LgVS3dns+SZEpr9hb9YXR2q6ALVcALBu0KlJcHIXRyy4ARZYvnlhiyspErRt9CP8xtoQBAchsvuAwzJtlDAIrd2F4DzMVFVmVVUiGZTfHzG74+YEWuU7K2G3B1AkbrWbQ64GfmW4VTI5rqLXLBmh/qCttXdq/2ZUaa6qDC3qDN4lrTDBvfRWGbKlF2UVS9PdfIbMsJTT/05gq4AikUEHb5C8Onzrg2d9wmBBsC9tagE0yqwf3RpkXIt/JCkbvLmSqeVOYCii6HiFL0xBdQ9HxDUtF8lJp6l8S6NkFXfdmCWH51LaqeJSrgC/auI2R1gFr6t1n4hBaoKLbYj05gP6CAXUqKB+KmzCUSkZgOA/B7/EVRrd+0WedalvDUqxNKOUWI7FJZtITdZaPXJyux/wCjPKiWV2o5BHyh3EwuoWq5Ve5bL1ZEl1RunI81A2wAo6LXb48xEP3AtUA0A7u64+N56rB8Ki0EzOGJhlDVFpgHroeIq15FLAUFrfMchsUIXDYxNqwpBSmytrx8eYlJQgKFvJi1wMsjg9ZQtBizj3iywfX9QoAbuM/+Ra2qqBcKa8Hu9RZfDuSFHo0IxXiL6rLV3vEdvPkRzD3I1Nj0jyJSPSf8HmVC6dl4C18DLbyhOLLl+Uv1rj9BdSg1IIGrrzAjYC5LMlE4MrZq9g0FdVg9Db5bfMcttZYHkYfVIEZpc9BqC+EoPVtS3D0QwiOmZpyxy4R3hVG+M/Muuuml+YCioLz57iWLxGuuPSFHQyqaCdeLPeLATZnRVkPSJKvWZD2WbGg5Lco1srQm8vPfBcUFcEqEMXXmvYqIruNqcXL3kpmmY2Zb5fb6rXj/AI5jkrcoCfu91DMNERAFwabdfWcdxpXDVZzHVGltvNnti29WNyv0ZaHLOhZrkbYXvlli6bRNHgNFHE1jM/BRW6ZA4TzA2KIznooWFjagWZ+d+IwiMBUBt+8Zchla5Mpyre6jKb7/ADAM3lEKrvNv/kQrU2qd+zx6RMTQWsByvgIVDVRvnH+fY4j3V5PMtSbKBWhahnD2E2i3kMYjqelKFYYFVGN+VT+P0YQLXghutJ6cn/hjCKzylkegNznkAZRw7HppWNXMB8VigUWiga5xrdlXc9SGXja1AKe4R8+lEjxxkxXWmVRBUvmscdFRATk1TSYJs1qXheA5Fp4HCW1uNcJpi0fkhmgXt5K88BtaCWcO6iqrDLa01uJmkOcZgA5bkzlv0l6YQchNj4fg5ZYjQfdRxbWe6ZRWIubMNf7NdRxrEra3KpCKPYM3QcReOgGKZLIF1ykBSKhuX3Il91fKH6QYxZB1e+Qp7yz8j7S37YrXyBW3Sz4jBykP7yoUF0DpVhtQVqW0h1lShV9Vf5h9kicGWU8Zx4ltbM0+n/kecOioy2adNo+t8Rk7Nm4+Xn1gUILhdBcGTToHgHHsjMX/AJOz4sXftAYCAU/LYuUsrV4arVxv14jEI2WOMr8XK6Nw4g+AKr5AHPHyHMRBR1i0QXSgimiV4KCNlItHR8QBD3iIvqwELhDFHPPAFCzxiJTqqnb/AFq3+Vv9B3BPSxDnKEFQKAPCkL4u+IRURehDA8W0DatruUNWvOrVr5COIa5uSwHmg94VJy2i9pcK1WT0/QAqppAvBf8A+RdedUHNq8XqE8RRwC5fcnvHgDiqjBw5wDm+hh2IVHIPl0eCOcRRObNoLdPS/wC1BYLXnR3A9/f2iRIr3xqvOb978RAoUy5ncDcalhdEwTauUZjAyOJcZm3nNWbPplwru/0BrIMOwPujZAl4XPJ+cEAUtZ8Vg/MCvJi5ul6YULTyIh1CMT+xK2KMVX0F/TGRw0PiBEa4iowWQyZwkvSqAmrJXo7BrT/cBELgLLDG65PHUJWkuc219hnp/uYhpYi8DgPBLU9Gzld5YUxEQtWPmIul8dQQwVbWPgljJdXxSUA7pVA7BN9uzAGXh+GKGXX6Azi2djSZzaqOh3X2D+Yl0CczZQOsZe7CPLh4lJgwlTbFDZGoCkrVY9PCNPqRfVaDSFWJxuWfg9EWrGuwR8l8xvKyFdwgtMDFGOowzOtheRfNX+YC9APCFNNc87GINuUkcE1hh8Q1hgvi38Av1j41aVty+1/24uPM2QPLAtkbumWOa6OqCjXtqXLRs+yVu6yfUyf5YpduB9TM+f7RQL4/zGFZEqi3nUrzFTDF0H4UFjrPv/RC6sUcoWe+fmFkXzRx/vxBv1MWTyfPj5i7aD0ItK9mFvkCvWbVPz9pSDV2Z2Cnwcc2zHkG7gZtp56vubAHtT0ut9wES4IVrivaUr0IukI9bQjgwTaPF/G/LHEZ3UR2cf7z3GT2m2UtBaF9SviFUHN9+k3yUvuMpZ/AZyqur3iAvdpWrv8AzLVbr9Tw9/cqC+Y7jltjiczDHyfJKXDy1PR+cErzUIsGA14tmWZYxlS7e6xjyRXeRaV8u3uUUGkq9qXtoutGu2ZCVQ0iu+7cvMrQ8oozba+aQ9ounpTDfOPaI7JaMjNgrWIcldQC4zb1TtOo1MSa6uq9HLy1H+Iq8vMwwOziGwSqo8wmvX4DqJncWvmJmFh+Ig25EYrcscvdpR2mW5OJe/Uup5/UjdE9IpEW3M7slvLGBhwVKb4L9buvSN0kCgfhbv3mN0CUWHmho+4bOJDQBGsIiLEOA73sGWDoV/iIQWaCuXjOJQK8QsRoMFQx7Q5vMwCvbv7i4E5HTmxv5lpyhLNnZLIl2ZLBfykrstf5zKJf/nmd60KPQ6YavEqpKLhRM5YsIsfqQxQk8o/T+I5UZEuWtFpX9vaP8LMKUVV8VUcm1otYStqANq6jz7k0Ns/D+jjJZVmo4DZlylnCHxL740eeZaaUlvbOOHzMwImauqYaJQq/mBHCiURKFtmcRnCVTYotFrLGsSWmhLnTdfMXLL8S5eZn9AjIA1uTVJqz5gPzAA1ShbWb/RX+BHmw9v0hQkGxOIJIYLo1fke5+gHKV+f8SgmvRaBm+6Kq/T/qV01TbzQZra6INJYKxGZTgS10NnQdrwFr4I30AvKAvwYOKqxPHHakhWTheC5zdAB7UOvYle2lhTsNlAq84YCh7KFp9TQ0jlQClPd95Rswep5LoHPtAeqBWMsT2aa4DzKZjMHCywitbyBqBdOFj0C8cES2VZw7RHnJTGgcvACqUFaQohLQo7ocS2dT/EXCad5gdDVh3IXYuKDmsRVdpFhbZYLD4gIAW9RDfFI7H4/1Cr+XHygA+x+iZDDT0ofph4cKkp2XTdv0jViz0T9TNFS4PtcsBBSXwrX0wFBrtXV4rTLqDzEH1m0d0T1DiIcKwqskPi3xlg0cjG6R9/rLomqO6H195cCvvg/DG5TLwQJ2UIrNUit4v4gpazVkC59CF7hCjaw4VdfBMgCOBpM0DzFAYxBCqtTQCfSLrjCXXxY/mGapAYCrwvuLdjJ538GGnALnmn9X+hgbraNr332DHnru2ja/L+tPiPgOleEUfDL9bVZRuX5RXpfMNIoA92vz9ZnYfHSr+n9QOEE7zkQ9/kiOJlgz/C1kNeuNeqD+XxEDWmR1/QMu02uuAfyRa7hLwH7EEsoGKWJTk1uf5f8AmH1gumfKpWpjhqEBdXZ4GXqCWjursfQgEb3AH9xKxdGKujPaDL0qAIbbul3B2xK12GKGqv7lb1Ba4pAe2CU/wWJdl8PrKk09FqGdeblMXQ8bM/rZ/C/5RFW/QhVnggXSLuENoCsvYTdkpEYvtoUfQfpQ2QohzRXbo8sxQJKgZCtd+h3MhCqywcB6H3bBkxScHTTmJ1ABQwaLcxu32XV3Q7wQFAyrbrtdsz/BfzP9d/MqMDqynz+hUywDB7XPDhGj8y27vM9seh+ZmWrRlvOGKqq2vMBlRQAH3DzN8lyWvd4u2nLGqEetS2r5v/kabgDn8iJs7MybC9jYkDbqXKvL8qCWRa1QFrSX4jO+j2LrtutA8R2CDikOGQlLa6gkoe8Bv0Iqu3RcPqKl9ELAgQqHdeoRwNCBau2/DLh4bhKqBsXkKurhx3OOR62abMXWchFctahRkAqSPHnDB3zwKza0V3Chm2IKMC9k3gq2Sgldlmo0NCWi/Ml1N6HQ29IqMLFw5ziA3WOVBXYlbPiA/wCdiKPXghWCQCXS6NAjd3XdR4cP8KRTwipaHQc6h76GMwkpWDVuXavKr/2TLz9INiPDA4QhnJR45DvfIiIJSdkTC4hSJpGJgFSKklK92Ke8y4tXRtpfOTu3uImRjYQRVe0UXm2HUPjxt1t4t8vcWCYc5Nj32nqOpqajQZLb2233b3BsyaZttXny1Nitosy91sYKsGcU5OoUCmpO2sM4MGPBHLwqtDNXj2PgjEOEgU3V77Od5Z1V6PhZ1gx4gJAgpbhWF7qsemIPWQAQB1nwfEt9cqWctDq4pUmNYOgOXgZfBbHbIqNqwsbfgMGP2XouIUiaR7lPooRSeB8LDwgm+XWgdBMB4Sx/eq4OGaA9w17Lq3EumeLc21XK8rL4MftjUMiW0It5PK9MPIwJuuVzwP5K4Y7dLI8jk/bXK9GeteF8FviGP1An7XaJsw3cHv8AvCVjULp1JD8KfNXibDTz7xWT1XrA0kzf2KGPCCvypKlPTKYKBa6DLNHxeE/AfcM9s3b6fD7x0k05XyVGCBI0Vh6DA8Af/GIRHJzAB7/7BZPtB/5zl+w7p/E3lu2v2MtkDj8PJ5Dcj9st/b//2Q==`;\n\nconst rows = data.chartData;\n\n// ------------------------------------------------------------\n// SETTINGS\n// ------------------------------------------------------------\n\nconst WIDTH = 1200;\nconst HEIGHT = 675;\n\nconst chartHeight = 285;\nconst zeroY = 190;\n\nconst maxPositiveHeight = 145;\nconst maxNegativeHeight = 62;\n\n// Fixed professional chart scale.\n// The visual axis automatically adapts to the largest value.\n\nconst allValues = rows.flatMap(r => [\n  Number(r.btc),\n  Number(r.eth)\n]);\n\nconst maxAbs = Math.max(\n  ...allValues.map(v => Math.abs(v)),\n  1\n);\n\n// Nice Y-axis ceiling\n\nfunction niceCeiling(value) {\n\n  if (value <= 200) return 200;\n  if (value <= 400) return 400;\n  if (value <= 600) return 600;\n  if (value <= 800) return 800;\n  if (value <= 1000) return 1000;\n\n  return Math.ceil(value / 500) * 500;\n}\n\nconst axisMax = niceCeiling(maxAbs);\n\n// ------------------------------------------------------------\n// FORMATTING\n// ------------------------------------------------------------\n\nfunction money(value) {\n\n  const n = Number(value);\n\n  const sign = n >= 0 ? \"+\" : \"-\";\n  const abs = Math.abs(n);\n\n  if (abs >= 1000) {\n    return `${sign}$${(abs / 1000).toFixed(2)}B`;\n  }\n\n  return `${sign}$${abs.toFixed(1)}M`;\n}\n\nfunction axisLabel(value) {\n\n  if (value === 0) return \"$0\";\n\n  if (Math.abs(value) >= 1000) {\n    return `$${(Math.abs(value) / 1000).toFixed(1)}B`;\n  }\n\n  return `$${Math.abs(value)}M`;\n}\n\n// ------------------------------------------------------------\n// BAR CALCULATIONS\n// ------------------------------------------------------------\n\nfunction positiveHeight(value) {\n\n  return Math.max(\n    4,\n    (Math.abs(value) / axisMax) * maxPositiveHeight\n  );\n}\n\nfunction negativeHeight(value) {\n\n  return Math.max(\n    4,\n    (Math.abs(value) / axisMax) * maxPositiveHeight\n  );\n}\n\nfunction buildBar(value, type) {\n\n  const n = Number(value);\n  const positive = n >= 0;\n\n  const height = positive\n    ? positiveHeight(n)\n    : negativeHeight(n);\n\n  const top = positive\n    ? zeroY - height\n    : zeroY;\n\n  const labelTop = positive\n    ? Math.max(3, top - 25)\n    : Math.min(\n        chartHeight - 26,\n        zeroY + height + 7\n      );\n\n  return `\n    <div\n      class=\"flow-bar ${type}-bar\"\n      style=\"\n        top:${top}px;\n        height:${height}px;\n      \"\n    ></div>\n\n    <div\n      class=\"bar-value ${type}-text\"\n      style=\"\n        top:${labelTop}px;\n      \"\n    >\n      ${money(n)}\n    </div>\n  `;\n}\n\n// ------------------------------------------------------------\n// DAY GROUPS\n// ------------------------------------------------------------\n\nconst dayGroups = rows.map((r, index) => {\n\n  return `\n    <div class=\"day-group\">\n\n      <div class=\"bar-column btc-column\">\n        ${buildBar(r.btc, \"btc\")}\n      </div>\n\n      <div class=\"bar-column eth-column\">\n        ${buildBar(r.eth, \"eth\")}\n      </div>\n\n      <div class=\"day-label\">\n        ${r.day}\n      </div>\n\n    </div>\n  `;\n\n}).join(\"\");\n\n// ------------------------------------------------------------\n// GRID\n// ------------------------------------------------------------\n\nconst gridValues = [\n  axisMax,\n  axisMax * 0.75,\n  axisMax * 0.50,\n  axisMax * 0.25,\n  0\n];\n\nconst gridLines = gridValues.map((value, index) => {\n\n  const y =\n    zeroY -\n    ((value / axisMax) * maxPositiveHeight);\n\n  return `\n    <div\n      class=\"grid-line ${value === 0 ? \"zero-grid\" : \"\"}\"\n      style=\"top:${y}px\"\n    >\n      <span class=\"axis-label\">\n        ${axisLabel(value)}\n      </span>\n    </div>\n  `;\n\n}).join(\"\");\n\n// Negative guide lines\n\nconst negativeGrid = [\n  axisMax * 0.25,\n  axisMax * 0.50\n].map(value => {\n\n  const y =\n    zeroY +\n    ((value / axisMax) * maxPositiveHeight);\n\n  if (y >= chartHeight - 20) return \"\";\n\n  return `\n    <div\n      class=\"grid-line negative-grid\"\n      style=\"top:${y}px\"\n    >\n      <span class=\"axis-label\">\n        -${axisLabel(value)}\n      </span>\n    </div>\n  `;\n\n}).join(\"\");\n\n// ------------------------------------------------------------\n// HTML\n// ------------------------------------------------------------\n\nconst html = `\n<div class=\"page\">\n\n  <div class=\"ambient ambient-one\"></div>\n  <div class=\"ambient ambient-two\"></div>\n  <div class=\"header-glow header-glow-left\"></div>\n<div class=\"header-glow header-glow-right\"></div>\n<div class=\"header-light-line header-light-line-left\"></div>\n<div class=\"header-light-line header-light-line-right\"></div>\n<!-- BACKGROUND CRYPTO SYMBOLS -->\n<div class=\"crypto-bg\">\n  <div class=\"bg-btc\">\n    <svg viewBox=\"0 0 64 64\">\n      <circle cx=\"32\" cy=\"32\" r=\"29\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/>\n      <path\n        fill=\"currentColor\"\n        d=\"M44.5 27.4c.6-4.1-2.5-6.3-6.8-7.8l1.4-5.5-3.4-.8-1.4 5.3c-.9-.2-1.8-.4-2.7-.6l1.4-5.4-3.4-.8-1.4 5.5c-.7-.2-1.5-.3-2.2-.5l-4.7-1.2-.9 3.6s2.5.6 2.5.6c1.4.3 1.6 1.3 1.6 2l-1.6 6.3-2.2 8.8c-.2.4-.6 1-1.5.8l-2.5-.6-1.7 3.9 4.4 1.1c.8.2 1.6.4 2.4.6l-1.4 5.6 3.4.8 1.4-5.5c.9.3 1.8.5 2.7.7l-1.4 5.5 3.4.8 1.4-5.6c5.8 1.1 10.2.6 12-4.6 1.5-4.2-.1-6.6-3.1-8.2 2.2-.5 3.9-2 4.3-5zm-7.7 10.8c-1 4.1-8.1 1.9-10.4 1.3l1.9-7.4c2.3.6 9.6 1.7 8.5 6.1zm1.1-10.9c-.9 3.7-6.9 1.8-8.8 1.3l1.7-6.7c1.9.5 8 1.4 7.1 5.4z\"\n        transform=\"rotate(-8 32 32)\"\n      />\n    </svg>\n  </div>\n\n  <div class=\"bg-eth\">\n    <svg viewBox=\"0 0 64 64\">\n      <path fill=\"currentColor\" opacity=\".9\" d=\"M32 5L16 32L32 41L48 32Z\"/>\n      <path fill=\"currentColor\" opacity=\".55\" d=\"M32 44L16 35L32 59L48 35Z\"/>\n    </svg>\n  </div>\n</div>\n  <!-- HEADER -->\n\n  <header class=\"header\">\n\n    <div class=\"brand\">\n\n      <div class=\"logo-shell\">\n  <img\n    class=\"fynbeat-logo\"\n    src=\"${fynbeatLogo}\"\n  >\n</div>\n\n      <div class=\"brand-copy\">\n\n        <div class=\"brand-name\">\n          FynBeat\n        </div>\n\n        <div class=\"brand-subtitle\">\n          SPOT ETF FLOW INTELLIGENCE\n        </div>\n\n      </div>\n\n    </div>\n\n\n    <div class=\"report-heading\">\n\n      <div class=\"weekly\">\n        WEEKLY\n      </div>\n\n      <div class=\"main-title\">\n        <span class=\"green\">\n          CRYPTO ETF\n        </span>\n        FLOWS\n      </div>\n\n      <div class=\"date-pill\">\n        ${data.report.dateRange.toUpperCase()}\n      </div>\n\n    </div>\n\n  </header>\n\n\n  <!-- LEGEND -->\n\n  <div class=\"legend\">\n\n    <div class=\"legend-item\">\n\n      <span class=\"legend-line btc-line\"></span>\n\n      <span class=\"legend-title\">\n        BITCOIN ETF\n      </span>\n\n      <span class=\"legend-small\">\n        BTC\n      </span>\n\n    </div>\n\n\n    <div class=\"legend-item\">\n\n      <span class=\"legend-line eth-line\"></span>\n\n      <span class=\"legend-title\">\n        ETHEREUM ETF\n      </span>\n\n      <span class=\"legend-small\">\n        ETH\n      </span>\n\n    </div>\n\n  </div>\n\n\n  <!-- CHART -->\n\n  <section class=\"chart-shell\">\n\n    <div class=\"chart-glow\"></div>\n\n    <div class=\"chart\">\n\n      ${gridLines}\n\n      ${negativeGrid}\n\n      <div class=\"vertical-grid vg1\"></div>\n      <div class=\"vertical-grid vg2\"></div>\n      <div class=\"vertical-grid vg3\"></div>\n      <div class=\"vertical-grid vg4\"></div>\n      <div class=\"vertical-grid vg5\"></div>\n\n      <div class=\"chart-groups\">\n        ${dayGroups}\n      </div>\n\n    </div>\n\n  </section>\n\n\n  <!-- SUMMARY -->\n\n  <section class=\"summary\">\n\n    <div class=\"summary-card btc-card\">\n\n      <div class=\"card-glow btc-card-glow\"></div>\n\n      <div class=\"coin-shell btc-coin\">\n  <svg class=\"coin-svg btc-svg\" viewBox=\"0 0 64 64\">\n    <circle cx=\"32\" cy=\"32\" r=\"30\" fill=\"#F7931A\"/>\n\n    <path\n      fill=\"#FFFFFF\"\n      transform=\"rotate(-8 32 32)\"\n      d=\"M44.5 27.4c.6-4.1-2.5-6.3-6.8-7.8l1.4-5.5-3.4-.8-1.4 5.3c-.9-.2-1.8-.4-2.7-.6l1.4-5.4-3.4-.8-1.4 5.5c-.7-.2-1.5-.3-2.2-.5l-4.7-1.2-.9 3.6s2.5.6 2.5.6c1.4.3 1.6 1.3 1.6 2l-1.6 6.3c.1 0 .2.1.4.1l-.4-.1-2.2 8.8c-.2.4-.6 1-1.5.8l-2.5-.6-1.7 3.9 4.4 1.1c.8.2 1.6.4 2.4.6l-1.4 5.6 3.4.8 1.4-5.5c.9.3 1.8.5 2.7.7l-1.4 5.5 3.4.8 1.4-5.6c5.8 1.1 10.2.6 12-4.6 1.5-4.2-.1-6.6-3.1-8.2 2.2-.5 3.9-2 4.3-5zm-7.7 10.8c-1 4.1-8.1 1.9-10.4 1.3l1.9-7.4c2.3.6 9.6 1.7 8.5 6.1zm1.1-10.9c-.9 3.7-6.9 1.8-8.8 1.3l1.7-6.7c1.9.5 8 1.4 7.1 5.4z\"\n    />\n  </svg>\n</div>\n\n      <div class=\"card-copy\">\n\n        <div class=\"card-title\">\n          BTC WEEKLY NET\n        </div>\n\n        <div class=\"card-value btc-text\">\n          ${data.btc.weeklyNetDisplay}\n        </div>\n\n      </div>\n\n      <div class=\"card-accent btc-accent\"></div>\n\n    </div>\n\n\n    <div class=\"summary-card eth-card\">\n\n      <div class=\"card-glow eth-card-glow\"></div>\n\n      <div class=\"coin-shell eth-coin\">\n  <svg class=\"coin-svg eth-svg\" viewBox=\"0 0 64 64\">\n    <circle cx=\"32\" cy=\"32\" r=\"30\" fill=\"#627EEA\"/>\n\n    <path\n      fill=\"#FFFFFF\"\n      fill-opacity=\"0.65\"\n      d=\"M32 8L31.7 9.1V40.8L32 41.1L46.7 32.4Z\"\n    />\n\n    <path\n      fill=\"#FFFFFF\"\n      d=\"M32 8L17.3 32.4L32 41.1V25.7Z\"\n    />\n\n    <path\n      fill=\"#FFFFFF\"\n      fill-opacity=\"0.65\"\n      d=\"M32 43.9L31.8 44.2V55.5L32 56L46.7 35.2Z\"\n    />\n\n    <path\n      fill=\"#FFFFFF\"\n      d=\"M32 56V43.9L17.3 35.2Z\"\n    />\n  </svg>\n</div>\n\n      <div class=\"card-copy\">\n\n        <div class=\"card-title\">\n          ETH WEEKLY NET\n        </div>\n\n        <div class=\"card-value eth-text\">\n          ${data.eth.weeklyNetDisplay}\n        </div>\n\n      </div>\n\n      <div class=\"card-accent eth-accent\"></div>\n\n    </div>\n\n  </section>\n\n\n  <!-- FOOTER -->\n\n  <footer class=\"footer\">\n\n    <div class=\"footer-left\">\n\n      <span class=\"footer-brand\">\n        FynBeat\n      </span>\n\n      <span class=\"footer-dot\">\n        •\n      </span>\n\n      <span>\n        SPOT ETF FLOW INTELLIGENCE\n      </span>\n\n    </div>\n\n    <div class=\"footer-right\">\n      DATA-DRIVEN CRYPTO MARKETS\n    </div>\n\n  </footer>\n\n</div>\n`;\n\n// ------------------------------------------------------------\n// CSS\n// ------------------------------------------------------------\n\nconst css = `\n\n* {\n  box-sizing: border-box;\n}\n\nhtml,\nbody {\n\n  margin: 0;\n  padding: 0;\n\n  width: ${WIDTH}px;\n  height: ${HEIGHT}px;\n\n  overflow: hidden;\n\n  font-family:\n    Arial,\n    Helvetica,\n    sans-serif;\n\n  background: #030908;\n}\n\n.page {\n\n  position: relative;\n\n  width: ${WIDTH}px;\n  height: ${HEIGHT}px;\n\n  padding:\n    36px\n    48px\n    25px\n    48px;\n\n  overflow: hidden;\n\n  color: #f5f7f8;\n\n  background:\n\n    radial-gradient(\n      circle at 8% 4%,\n      rgba(0,255,157,.12),\n      transparent 25%\n    ),\n\n    radial-gradient(\n      circle at 88% 10%,\n      rgba(0,255,157,.08),\n      transparent 24%\n    ),\n\n    radial-gradient(\n      circle at 82% 80%,\n      rgba(105,82,255,.06),\n      transparent 28%\n    ),\n\n    linear-gradient(\n      135deg,\n      #06100e 0%,\n      #030908 48%,\n      #06100e 100%\n    );\n}\n\n/* subtle tech texture */\n\n.page:before {\n\n  content: \"\";\n\n  position: absolute;\n\n  inset: 0;\n\n  opacity: .13;\n\n  background-image:\n\n    linear-gradient(\n      rgba(44,255,169,.06) 1px,\n      transparent 1px\n    ),\n\n    linear-gradient(\n      90deg,\n      rgba(44,255,169,.04) 1px,\n      transparent 1px\n    );\n\n  background-size:\n    55px 55px;\n\n  pointer-events: none;\n}\n\n.ambient {\n\n  position: absolute;\n\n  border-radius: 50%;\n\n  filter: blur(80px);\n\n  pointer-events: none;\n}\n\n.ambient-one {\n\n  width: 280px;\n  height: 280px;\n\n  left: -120px;\n  top: 150px;\n\n  background:\n    rgba(0,255,157,.07);\n}\n\n.ambient-two {\n\n  width: 260px;\n  height: 260px;\n\n  right: -80px;\n  top: 260px;\n\n  background:\n    rgba(91,77,255,.06);\n}\n/* HEADER GREEN AMBIENT LIGHTS */\n\n.header-glow {\n  position: absolute;\n  top: 0;\n  height: 190px;\n  pointer-events: none;\n  z-index: 0;\n}\n\n.header-glow-left {\n  left: -40px;\n  width: 650px;\n\n  background:\n    radial-gradient(\n      ellipse at 12% 42%,\n      rgba(0,255,157,.34) 0%,\n      rgba(0,255,157,.20) 20%,\n      rgba(0,255,157,.10) 40%,\n      rgba(0,255,157,.035) 62%,\n      transparent 82%\n    );\n}\n\n.header-glow-right {\n  right: -40px;\n  width: 650px;\n\n  background:\n    radial-gradient(\n      ellipse at 88% 42%,\n      rgba(0,255,157,.34) 0%,\n      rgba(0,255,157,.20) 20%,\n      rgba(0,255,157,.10) 40%,\n      rgba(0,255,157,.035) 62%,\n      transparent 82%\n    );\n}\n\n\n\n/* BACKGROUND CRYPTO SYMBOLS */\n\n.crypto-bg {\n  position: absolute;\n\n  /* FynBeat ile başlık arasındaki üst boşluk */\n  top: 18px;\n  left: 440px;\n\n  width: 390px;\n  height: 180px;\n\n  pointer-events: none;\n  z-index: 1;\n\n  overflow: visible;\n}\n\n.bg-btc,\n.bg-eth {\n  position: absolute;\n\n  /* Öncekinden daha belirgin */\n  opacity: 0.40;\n}\n\n.bg-btc {\n  width: 155px;\n  height: 155px;\n\n  left: 0;\n  top: 0;\n\n  color: #f7931a;\n\n  transform: rotate(-8deg);\n\n  filter:\n    drop-shadow(0 0 24px rgba(247,147,26,.22));\n}\n\n.bg-eth {\n  width: 125px;\n  height: 125px;\n\n  left: 175px;\n  top: 18px;\n\n  color: #8b7cff;\n\n  transform: rotate(4deg);\n\n  filter:\n    drop-shadow(0 0 24px rgba(139,124,255,.20));\n}\n\n.bg-btc svg,\n.bg-eth svg {\n  width: 100%;\n  height: 100%;\n  display: block;\n}\n\n/* ============================================================\n   HEADER\n============================================================ */\n\n.header {\n\n  position: relative;\n\n  z-index: 5;\n\n  height: 103px;\n\n  display: flex;\n\n  justify-content:\n    space-between;\n\n  align-items:\n    flex-start;\n}\n\n.brand {\n\n  display: flex;\n\n  align-items: center;\n\n  gap: 16px;\n\n  margin-top: 3px;\n}\n\n.logo-shell .fynbeat-logo {\n  width: 68px;\n  height: 68px;\n\n  border-radius: 50%;\n\n  object-fit: cover;\n\n  box-shadow:\n    0 0 22px rgba(0,255,157,.25);\n\n  border:\n    1px solid rgba(0,255,157,.25);\n}\n\n.logo-ring {\n\n  width: 68px;\n  height: 68px;\n\n  padding: 4px;\n\n  border-radius: 50%;\n\n  background:\n    linear-gradient(\n      135deg,\n      #00ff9d,\n      #168f65\n    );\n\n  box-shadow:\n    0 0 25px\n    rgba(0,255,157,.18);\n}\n\n.logo-temp {\n\n  width: 100%;\n  height: 100%;\n\n  border-radius: 50%;\n\n  display: flex;\n\n  align-items: center;\n  justify-content: center;\n\n  background:\n    #07110e;\n\n  color:\n    #00f39a;\n\n  font-size: 35px;\n\n  font-weight: 900;\n}\n\n.brand-name {\n\n  font-size: 27px;\n\n  font-weight: 900;\n\n  letter-spacing: -.5px;\n}\n\n.brand-subtitle {\n\n  margin-top: 5px;\n\n  color: #5e716b;\n\n  font-size: 9px;\n\n  font-weight: 800;\n\n  letter-spacing: 2.3px;\n}\n\n.report-heading {\n\n  text-align: right;\n}\n\n.weekly {\n\n  color: #74827d;\n\n  font-size: 17px;\n\n  font-weight: 900;\n\n  letter-spacing: 7px;\n\n  line-height: 18px;\n}\n\n.main-title {\n\n  margin-top: 4px;\n\n  font-size: 36px;\n\n  font-weight: 900;\n\n  letter-spacing: -.8px;\n\n  line-height: 39px;\n}\n\n.green {\n\n  color: #00ed92;\n\n  text-shadow:\n    0 0 18px\n    rgba(0,237,146,.12);\n}\n\n.date-pill {\n\n  display: inline-block;\n\n  margin-top: 8px;\n\n  padding:\n    6px\n    15px;\n\n  border:\n    1px solid\n    rgba(0,237,146,.22);\n\n  border-radius: 20px;\n\n  background:\n    rgba(0,237,146,.035);\n\n  color: #80918b;\n\n  font-size: 10px;\n\n  font-weight: 800;\n\n  letter-spacing: 2px;\n}\n\n\n/* ============================================================\n   LEGEND\n============================================================ */\n\n.legend {\n\n  position: relative;\n\n  z-index: 5;\n\n  height: 32px;\n\n  display: flex;\n\n  align-items: center;\n\n  gap: 40px;\n\n  padding-left: 70px;\n}\n\n.legend-item {\n\n  display: flex;\n\n  align-items: center;\n\n  gap: 8px;\n}\n\n.legend-line {\n\n  width: 22px;\n  height: 4px;\n\n  border-radius: 8px;\n}\n\n.btc-line {\n\n  background: #f7931a;\n\n  box-shadow:\n    0 0 10px\n    rgba(247,147,26,.5);\n}\n\n.eth-line {\n\n  background: #8277ff;\n\n  box-shadow:\n    0 0 10px\n    rgba(130,119,255,.5);\n}\n\n.legend-title {\n\n  color: #c2cbc7;\n\n  font-size: 11px;\n\n  font-weight: 800;\n\n  letter-spacing: .6px;\n}\n\n.legend-small {\n\n  color: #52615c;\n\n  font-size: 9px;\n\n  font-weight: 700;\n}\n\n\n/* ============================================================\n   CHART\n============================================================ */\n\n.chart-shell {\n\n  position: relative;\n\n  z-index: 5;\n\n  width: 100%;\n\n  height: ${chartHeight}px;\n}\n\n.chart-glow {\n\n  position: absolute;\n\n  left: 60px;\n  right: 20px;\n\n  top: 20px;\n  bottom: 35px;\n\n  background:\n    radial-gradient(\n      ellipse at center,\n      rgba(0,255,157,.025),\n      transparent 65%\n    );\n}\n\n.chart {\n\n  position: relative;\n\n  width: 100%;\n  height: ${chartHeight}px;\n}\n\n.grid-line {\n\n  position: absolute;\n\n  left: 60px;\n  right: 10px;\n\n  height: 1px;\n\n  background:\n    rgba(137,165,155,.10);\n\n  z-index: 1;\n}\n\n.grid-line:after {\n\n  content: \"\";\n\n  position: absolute;\n\n  left: 0;\n  right: 0;\n\n  top: 0;\n\n  height: 1px;\n\n  background:\n    linear-gradient(\n      90deg,\n      transparent,\n      rgba(100,142,128,.11),\n      transparent\n    );\n}\n\n.zero-grid {\n\n  height: 2px;\n\n  background:\n    rgba(167,193,183,.30);\n}\n\n.negative-grid {\n\n  background:\n    rgba(137,165,155,.07);\n}\n\n.axis-label {\n\n  position: absolute;\n\n  left: -57px;\n\n  top: -6px;\n\n  width: 45px;\n\n  text-align: right;\n\n  color: #4f605a;\n\n  font-size: 9px;\n\n  font-weight: 700;\n}\n\n.vertical-grid {\n\n  position: absolute;\n\n  top: 20px;\n  bottom: 32px;\n\n  width: 1px;\n\n  background:\n    linear-gradient(\n      transparent,\n      rgba(92,123,112,.08),\n      transparent\n    );\n\n  z-index: 1;\n}\n\n.vg1 { left: 20%; }\n.vg2 { left: 37%; }\n.vg3 { left: 54%; }\n.vg4 { left: 71%; }\n.vg5 { left: 88%; }\n\n.chart-groups {\n\n  position: absolute;\n\n  left: 72px;\n  right: 5px;\n\n  top: 0;\n\n  height: 100%;\n\n  display: flex;\n\n  justify-content:\n    space-around;\n\n  z-index: 3;\n}\n\n.day-group {\n\n  position: relative;\n\n  width: 170px;\n  height: 100%;\n}\n\n.bar-column {\n\n  position: absolute;\n\n  top: 0;\n\n  width: 68px;\n  height: 100%;\n}\n\n.btc-column {\n  left: 15px;\n}\n\n.eth-column {\n  right: 15px;\n}\n\n.flow-bar {\n\n  position: absolute;\n\n  left: 13px;\n\n  width: 42px;\n\n  border-radius:\n    4px\n    4px\n    2px\n    2px;\n}\n\n.btc-bar {\n\n  background:\n\n    linear-gradient(\n      90deg,\n      rgba(255,255,255,.10),\n      transparent 35%\n    ),\n\n    linear-gradient(\n      180deg,\n      #ffae42 0%,\n      #f7931a 50%,\n      #d87508 100%\n    );\n\n  border:\n    1px solid\n    rgba(255,181,80,.45);\n\n  box-shadow:\n\n    0 0 14px\n    rgba(247,147,26,.25),\n\n    inset 0 1px\n    rgba(255,255,255,.16);\n}\n\n.eth-bar {\n\n  background:\n\n    linear-gradient(\n      90deg,\n      rgba(255,255,255,.10),\n      transparent 35%\n    ),\n\n    linear-gradient(\n      180deg,\n      #a49aff 0%,\n      #7c70ff 52%,\n      #6255e9 100%\n    );\n\n  border:\n    1px solid\n    rgba(169,159,255,.40);\n\n  box-shadow:\n\n    0 0 14px\n    rgba(123,112,255,.24),\n\n    inset 0 1px\n    rgba(255,255,255,.15);\n}\n\n.bar-value {\n\n  position: absolute;\n\n  left: -14px;\n\n  width: 96px;\n\n  text-align: center;\n\n  white-space: nowrap;\n\n  font-size: 10px;\n\n  font-weight: 800;\n\n  letter-spacing: -.1px;\n}\n\n.btc-text {\n\n  color: #f6a03a;\n}\n\n.eth-text {\n\n  color: #958cff;\n}\n\n.day-label {\n\n  position: absolute;\n\n  left: 0;\n  right: 0;\n\n  bottom: 7px;\n\n  text-align: center;\n\n  color: #687a73;\n\n  font-size: 11px;\n\n  font-weight: 900;\n\n  letter-spacing: 2px;\n}\n\n\n/* ============================================================\n   SUMMARY CARDS\n============================================================ */\n\n.summary {\n\n  position: relative;\n\n  z-index: 5;\n\n  height: 125px;\n\n  margin-top: 5px;\n\n  display: flex;\n\n  gap: 18px;\n}\n\n.summary-card {\n\n  position: relative;\n\n  flex: 1;\n\n  height: 112px;\n\n  display: flex;\n\n  align-items: center;\n\n  padding:\n    18px\n    27px;\n\n  overflow: hidden;\n\n  border-radius: 15px;\n\n  background:\n\n    linear-gradient(\n      135deg,\n      rgba(255,255,255,.028),\n      rgba(255,255,255,.012)\n    ),\n\n    rgba(4,13,11,.72);\n}\n\n.btc-card {\n\n  border:\n    1px solid\n    rgba(247,147,26,.28);\n}\n\n.eth-card {\n\n  border:\n    1px solid\n    rgba(125,112,255,.28);\n}\n\n.card-glow {\n\n  position: absolute;\n\n  width: 180px;\n  height: 180px;\n\n  right: -70px;\n  top: -70px;\n\n  border-radius: 50%;\n\n  filter: blur(45px);\n}\n\n.btc-card-glow {\n\n  background:\n    rgba(247,147,26,.075);\n}\n\n.eth-card-glow {\n\n  background:\n    rgba(125,112,255,.075);\n}\n\n.coin-shell {\n\n  position: relative;\n\n  z-index: 2;\n\n  width: 56px;\n  height: 56px;\n\n  flex: 0 0 56px;\n\n  display: flex;\n\n  align-items: center;\n  justify-content: center;\n\n  border-radius: 50%;\n\n  margin-right: 19px;\n\n  font-size: 32px;\n\n  font-weight: 700;\n}\n.coin-svg {\n  width: 44px;\n  height: 44px;\n  display: block;\n}\n\n.btc-svg,\n.eth-svg {\n  flex-shrink: 0;\n}\n.btc-coin {\n\n  color: #f7931a;\n\n  border:\n    1px solid\n    rgba(247,147,26,.34);\n\n  background:\n    radial-gradient(\n      circle,\n      rgba(247,147,26,.16),\n      rgba(247,147,26,.035)\n    );\n\n  box-shadow:\n    0 0 20px\n    rgba(247,147,26,.09);\n}\n\n.eth-coin {\n\n  color: #8f85ff;\n\n  border:\n    1px solid\n    rgba(143,133,255,.34);\n\n  background:\n    radial-gradient(\n      circle,\n      rgba(143,133,255,.16),\n      rgba(143,133,255,.035)\n    );\n\n  box-shadow:\n    0 0 20px\n    rgba(143,133,255,.09);\n}\n\n.card-copy {\n\n  position: relative;\n\n  z-index: 2;\n}\n\n.card-title {\n\n  color: #6e7f79;\n\n  font-size: 10px;\n\n  font-weight: 900;\n\n  letter-spacing: 2px;\n}\n\n.card-value {\n\n  margin-top: 5px;\n\n  font-size: 33px;\n\n  font-weight: 900;\n\n  letter-spacing: -.8px;\n}\n\n.card-accent {\n\n  position: absolute;\n\n  left: 0;\n  top: 21px;\n  bottom: 21px;\n\n  width: 3px;\n\n  border-radius: 4px;\n}\n\n.btc-accent {\n\n  background: #f7931a;\n\n  box-shadow:\n    0 0 10px\n    rgba(247,147,26,.5);\n}\n\n.eth-accent {\n\n  background: #8176ff;\n\n  box-shadow:\n    0 0 10px\n    rgba(129,118,255,.5);\n}\n\n\n/* ============================================================\n   FOOTER\n============================================================ */\n\n.footer {\n\n  position: relative;\n\n  z-index: 5;\n\n  height: 31px;\n\n  display: flex;\n\n  justify-content:\n    space-between;\n\n  align-items: center;\n\n  border-top:\n    1px solid\n    rgba(255,255,255,.035);\n\n  color: #45564f;\n\n  font-size: 8px;\n\n  font-weight: 800;\n\n  letter-spacing: 1.8px;\n}\n\n.footer-left {\n\n  display: flex;\n\n  align-items: center;\n\n  gap: 9px;\n}\n\n.footer-brand {\n\n  color: #00d985;\n\n  font-size: 10px;\n\n  font-weight: 900;\n}\n\n.footer-dot {\n\n  color: #275d49;\n}\n\n.footer-right {\n\n  color: #34443e;\n}\n\n`;\n\n// ------------------------------------------------------------\n// OUTPUT\n// ------------------------------------------------------------\n\nreturn [\n  {\n    json: {\n      ...data,\n\n      render: {\n        html,\n        css\n      }\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        1984
+      ],
+      "id": "0b083f6b-e85c-4c61-8108-ad4a36548b7c",
+      "name": "Build FynBeat Weekly Template"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "YOUR_ETF_WEEKLY_PUBLISH_STATE_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "ETF Weekly Publish State"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyValue": "1"
+            }
+          ]
+        },
+        "limit": 1
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -112,
+        2000
+      ],
+      "id": "1345d8df-573f-43ea-996d-b9193411cad0",
+      "name": "Get Last Published Week"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "664a8aa8-1b42-467b-bbd3-6bbc53208fa8",
+              "leftValue": "={{ $('Build Weekly BTC & ETH Dataset').first().json.week.friday }}",
+              "rightValue": "={{ $json.lastPublishedWeek }}",
+              "operator": {
+                "type": "dateTime",
+                "operation": "after"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": "={{ false }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        96,
+        2000
+      ],
+      "id": "a83ae45b-5921-42da-8f5d-ab97a2032c2c",
+      "name": "Is New Weekly Report?"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1248,
+        2352
+      ],
+      "id": "b66ed3d3-51bd-4d8f-aaa7-8c0b9b696d5b",
+      "name": "Download Weekly ETF Graphic"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.x.com/2/media/upload/initialize",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth1Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "total_bytes",
+              "value": "={{ $json.total_bytes }}"
+            },
+            {
+              "name": "media_type",
+              "value": "image/png"
+            },
+            {
+              "name": "media_category",
+              "value": "tweet_image"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1472,
+        2000
+      ],
+      "id": "306f6d49-2c39-4abc-b47e-3b2fd56c734d",
+      "name": "Initialize X Weekly Media Upload",
+      "credentials": {
+        "twitterOAuth2Api": {
+          "id": "",
+          "name": "X account"
+        },
+        "oAuth2Api": {
+          "id": "",
+          "name": "Unnamed credential"
+        },
+        "twitterOAuth1Api": {
+          "id": "",
+          "name": "X OAuth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.x.com/2/media/upload/{{ $('Initialize X Weekly Media Upload').first().json.data.id }}/append",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth1Api",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "media",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "segment_index",
+              "value": "0"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1968,
+        2000
+      ],
+      "id": "36dc6461-5bf8-4a5d-858a-1b11aa73657d",
+      "name": "Append X Weekly Media",
+      "alwaysOutputData": false,
+      "credentials": {
+        "twitterOAuth2Api": {
+          "id": "",
+          "name": "X account"
+        },
+        "twitterOAuth1Api": {
+          "id": "",
+          "name": "X OAuth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1712,
+        2000
+      ],
+      "id": "8481bfaa-b97a-42b6-b386-a164f7bc7b9d",
+      "name": "Merge X Media Upload Date"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nfor (let i = 0; i < items.length; i++) {\n  const buffer = await this.helpers.getBinaryDataBuffer(i, 'data');\n\n  items[i].json.total_bytes = buffer.length;\n}\n\nreturn items;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1264,
+        2000
+      ],
+      "id": "2935a25f-6af4-42e6-b615-7204b0e24cac",
+      "name": "Prepare X Media Upload Metadata"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.x.com/2/media/upload/{{ $('Initialize X Weekly Media Upload').first().json.data.id }}/finalize",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth1Api",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2176,
+        2000
+      ],
+      "id": "1b6bbafd-4cb4-4fc7-95c7-7c2fb073b87f",
+      "name": "Finalize X Weekly Media Upload",
+      "alwaysOutputData": false,
+      "credentials": {
+        "twitterOAuth1Api": {
+          "id": "",
+          "name": "X OAuth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const weekly = $('Build Weekly BTC & ETH Dataset').first().json;\n\nconst btc = Number(weekly.btc.weeklyNetUsdM);\nconst eth = Number(weekly.eth.weeklyNetUsdM);\n\nfunction formatFlow(value) {\n  const sign = value >= 0 ? '+' : '-';\n  const abs = Math.abs(value);\n\n  if (abs >= 1000) {\n    return `${sign}$${(abs / 1000).toFixed(2)}B`;\n  }\n\n  return `${sign}$${abs.toFixed(1)}M`;\n}\n\nconst date = new Date(`${weekly.week.friday}T12:00:00Z`);\n\nconst fridayDisplay = date.toLocaleDateString('en-US', {\n  month: 'short',\n  day: 'numeric'\n});\n\nconst tweetText =\n`📊 Weekly Crypto ETF Flows\n\nBTC: ${formatFlow(btc)}\nETH: ${formatFlow(eth)}\n\nWeek ending ${fridayDisplay}\n\nFull week at a glance 👇`;\n\nreturn [\n  {\n    json: {\n      tweetText,\n      mediaId: $('Initialize X Weekly Media Upload').first().json.data.id,\n      weekEnding: weekly.week.friday,\n      btcWeeklyNet: btc,\n      ethWeeklyNet: eth\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2384,
+        2000
+      ],
+      "id": "514fbb83-ea39-445e-9678-cc498e81c23c",
+      "name": "Prepare Weekly ETF Tweet"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.x.com/2/tweets",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twitterOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  text: $json.tweetText,\n  media: {\n    media_ids: [$json.mediaId]\n  }\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2592,
+        2000
+      ],
+      "id": "2c89d735-4641-46f0-8317-02f96ea95089",
+      "name": "Post Weekly ETF Report to X",
+      "credentials": {
+        "twitterOAuth2Api": {
+          "id": "",
+          "name": "X account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "value": "YOUR_ETF_WEEKLY_PUBLISH_STATE_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "ETF Weekly Publish State"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyValue": "1"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lastPublishedWeek": "={{ $('Build Weekly BTC & ETH Dataset').first().json.week.friday }}"
+          },
+          "matchingColumns": [
+            "lastPublishedWeek"
+          ],
+          "schema": [
+            {
+              "id": "lastPublishedWeek",
+              "displayName": "lastPublishedWeek",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2800,
+        2000
+      ],
+      "id": "d4addcff-4d73-4dba-82eb-5eef1b56ec1a",
+      "name": "Update Last Published Week"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// PREPARE SOSOVALUE ETF REQUESTS\n// BTC / ETH\n// targetDate mevcut ETF motorundan gelir\n// ==========================================\n\nconst targetDate =\n  $('Prepare Final ETF Dataset').first().json.publishCheck?.targetDate;\n\nif (!targetDate) {\n  throw new Error('ETF targetDate not found.');\n}\n\nconst assets = [\n  { symbol: 'BTC', asset: 'bitcoin' },\n  { symbol: 'ETH', asset: 'ethereum' }\n];\n\nreturn assets.map(item => ({\n  json: {\n    symbol: item.symbol,\n    asset: item.asset,\n    countryCode: 'US',\n    targetDate\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        912
+      ],
+      "id": "81349931-ea61-4986-a832-e53ca58e7529",
+      "name": "Prepare SoSoValue ETF Requests"
+    },
+    {
+      "parameters": {
+        "url": "https://openapi.sosovalue.com/openapi/v1/etfs/summary-history",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "symbol",
+              "value": "={{ $json.symbol }}"
+            },
+            {
+              "name": "country_code",
+              "value": "={{ $json.countryCode }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": " x-soso-api-key",
+              "value": "YOUR_SOSOVALUE_API_KEY"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1152,
+        912
+      ],
+      "id": "c66482ca-d606-4aa5-ba53-8f66c92bc133",
+      "name": "Get SoSoValue ETF Summary"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// BUILD SOSOVALUE ETF DATASET\n// BTC + ETH ONLY\n// ==========================================\n\nconst responses = $input.all();\n\nconst targetDate = $('Prepare Final ETF Dataset')\n  .first().json.publishCheck?.targetDate;\n\nif (!targetDate) {\n  throw new Error('ETF targetDate not found.');\n}\n\nconst assetMap = [\n  { symbol: 'BTC', asset: 'bitcoin' },\n  { symbol: 'ETH', asset: 'ethereum' }\n];\n\nconst requiredSymbols = assetMap.map(a => a.symbol);\n\nif (responses.length !== assetMap.length) {\n  throw new Error(\n    `Expected ${assetMap.length} SoSoValue responses, received ${responses.length}`\n  );\n}\n\nconst assets = [];\nconst missingAssets = [];\n\nresponses.forEach((item, index) => {\n  const config = assetMap[index];\n  const response = item.json;\n\n  if (response.code !== 0) {\n    throw new Error(`SoSoValue request failed for ${config.symbol}`);\n  }\n\n  if (!Array.isArray(response.data)) {\n    throw new Error(`Invalid SoSoValue data for ${config.symbol}`);\n  }\n\n  const record = response.data.find(row => row.date === targetDate);\n\n  if (!record) {\n    missingAssets.push({ symbol: config.symbol, asset: config.asset, reason: 'TARGET_DATE_NOT_FOUND' });\n    return;\n  }\n\n  if (\n    record.total_net_inflow === null ||\n    record.total_net_inflow === undefined ||\n    record.total_net_inflow === ''\n  ) {\n    missingAssets.push({ symbol: config.symbol, asset: config.asset, reason: 'FLOW_NOT_READY' });\n    return;\n  }\n\n  // 0 is a VALID flow value.\n  const netFlowUsdM = Number(record.total_net_inflow) / 1_000_000;\n\n  if (!Number.isFinite(netFlowUsdM)) {\n    throw new Error(`Invalid ${config.symbol} flow for ${targetDate}`);\n  }\n\n  assets.push({\n    symbol: config.symbol,\n    asset: config.asset,\n    date: targetDate,\n    netFlowUsdM,\n    source: 'SoSoValue'\n  });\n});\n\nconst readySymbols = assets.map(a => a.symbol);\n\nconst missingRequiredSymbols = requiredSymbols.filter(\n  symbol => !readySymbols.includes(symbol)\n);\n\nconst allAssetsReady = missingRequiredSymbols.length === 0;\n\nreturn [{\n  json: {\n    targetDate,\n    assets,\n    missingAssets,\n    validation: {\n      readyCount: assets.length,\n      totalRequired: requiredSymbols.length,\n      allAssetsReady,\n      requiredAssetsReady: allAssetsReady,\n      readySymbols,\n      missingSymbols: missingRequiredSymbols,\n      missingRequiredSymbols,\n      needsFallback: !allAssetsReady\n    },\n    datasetSource: 'SOSOVALUE'\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1376,
+        912
+      ],
+      "id": "739445a8-1cad-4725-8a24-93b22b49c6ac",
+      "name": "Build SoSoValue ETF Dataset"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// FYNBEAT — BUILD FINAL ETF DATASET V3\n// BTC + ETH ONLY\n// ==========================================\n\nconst core = $input.first()?.json;\n\nif (\n  !core ||\n  !Array.isArray(core.assets) ||\n  typeof core.targetDate !== 'string'\n) {\n  // Core data not ready – stop quietly, next poll retries.\n  return [];\n}\n\nconst REQUIRED = ['BTC', 'ETH'];\nconst targetDate = core.targetDate;\n\nif (!/^\\d{4}-\\d{2}-\\d{2}$/.test(targetDate)) {\n  throw new Error(`Invalid targetDate: ${targetDate}`);\n}\n\nconst assets = [];\nconst invalidAssets = [];\nconst seen = new Set();\n\nfor (const asset of core.assets) {\n  const symbol = asset.symbol;\n\n  if (!REQUIRED.includes(symbol)) {\n    // Ignore anything that is not BTC / ETH.\n    continue;\n  }\n\n  if (seen.has(symbol)) {\n    throw new Error(`Duplicate ETF symbol: ${symbol}`);\n  }\n  seen.add(symbol);\n\n  const valid =\n    asset.date === targetDate &&\n    typeof asset.netFlowUsdM === 'number' &&\n    Number.isFinite(asset.netFlowUsdM);\n\n  if (!valid) {\n    invalidAssets.push({ symbol, reason: 'INVALID_DATE_OR_FLOW' });\n    continue;\n  }\n\n  assets.push({\n    symbol,\n    asset: asset.asset,\n    date: targetDate,\n    netFlowUsdM: asset.netFlowUsdM,\n    source: asset.source\n  });\n}\n\nconst readySymbols = assets.map(a => a.symbol);\n\nconst missingRequiredSymbols = REQUIRED.filter(\n  symbol => !readySymbols.includes(symbol)\n);\n\nif (missingRequiredSymbols.length > 0) {\n  throw new Error(\n    `Mandatory ETF data missing: ${missingRequiredSymbols.join(', ')}`\n  );\n}\n\nassets.sort((a, b) => REQUIRED.indexOf(a.symbol) - REQUIRED.indexOf(b.symbol));\n\nconst fallbackUsed = core.validation?.fallbackUsed === true;\n\nreturn [{\n  json: {\n    targetDate,\n    assets,\n    validation: {\n      readyCount: assets.length,\n      totalRequired: REQUIRED.length,\n      requiredAssetsReady: true,\n      allAssetsReady: true,\n      readySymbols,\n      missingSymbols: [],\n      missingRequiredSymbols: [],\n      invalidAssets,\n      coreSource: core.datasetSource,\n      fallbackUsed\n    },\n    finalDatasetSource: fallbackUsed\n      ? 'SOSOVALUE_PLUS_FARSIDE_FALLBACK'\n      : 'SOSOVALUE'\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2048,
+        1136
+      ],
+      "id": "e32c69f6-ea5a-4e6d-b25d-3251f8009ab9",
+      "name": "Build Final ETF Dataset"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "475f74a1-425f-4993-be0a-193e7b16b7a0",
+              "leftValue": "={{ $json.validation.requiredAssetsReady === true && $json.validation.missingRequiredSymbols.length === 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1904,
+        496
+      ],
+      "id": "1fadb4b8-e631-4652-a821-4103394310e5",
+      "name": "Final ETF Data Ready?"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// CHECK ETF DATE BEFORE FINAL DATA FETCH\n// Early duplicate protection\n// ==========================================\n\nconst lastPublishedDate = $json.lastPublishedDate;\n\nconst targetDate =\n  $('Prepare Final ETF Dataset').first().json.publishCheck?.targetDate;\n\nif (!targetDate) {\n  throw new Error('ETF targetDate not found before final data fetch.');\n}\n\nif (!lastPublishedDate) {\n  throw new Error('Last published ETF date not found.');\n}\n\nconst shouldFetchFinalData =\n  targetDate > lastPublishedDate;\n\nreturn [{\n  json: {\n    targetDate,\n    lastPublishedDate,\n    shouldFetchFinalData,\n    decision: shouldFetchFinalData\n      ? 'FETCH_FINAL_DATA'\n      : 'ALREADY_PUBLISHED'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        288,
+        0
+      ],
+      "id": "32963677-8a37-4b60-af5f-7dc1bfc1bb4b",
+      "name": "Check ETF Date Before Final Data"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "0d4332ae-8526-477c-8ea6-0f8011f72bf0",
+              "leftValue": "={{ $json.shouldFetchFinalData }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        592,
+        0
+      ],
+      "id": "9ff10caa-3ea3-44b5-beb4-dca2a804ae08",
+      "name": "ETF Date Needs Final Data?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ede5fca8-d7e8-4733-9ba7-ebad5a0d748b",
+              "leftValue": "={{\n  [7, 8, 10, 13, 16, 19, 22].includes(\n    $now.setZone('Europe/Istanbul').hour\n  ) &&\n  $now.setZone('Europe/Istanbul').minute === 0\n}}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        208,
+        1056
+      ],
+      "id": "0847d0aa-fc51-4f30-9eda-98d91913092a",
+      "name": "Final ETF Data Check Time?"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "YOUR_ETF_FLOW_PUBLISH_STATE_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "ETF Flow Publish State"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyValue": "1"
+            }
+          ]
+        },
+        "limit": 1
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "47734a44-9862-4cc4-b2a8-14c98a28677f",
+      "name": "Get ETF Publish State Before Final Data"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "5c8c4e32-f7d9-43d0-b0e7-7d7acb671123",
+              "leftValue": "={{ $json.validation.needsFallback }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1600,
+        912
+      ],
+      "id": "49418480-4c14-4560-86cb-ed3ebce78a99",
+      "name": "SoSoValue Fallback Needed?"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// PREPARE FARSIDE FALLBACK REQUESTS\n// PRODUCTION MODE\n//\n// Only requests fallback for assets that\n// SoSoValue could not resolve.\n// ==========================================\n\nconst data = $input.first().json;\n\nconst targetDate = data.targetDate;\n\nconst missingSymbols =\n  data.validation?.missingSymbols || [];\n\nif (!targetDate) {\n  throw new Error('ETF targetDate not found.');\n}\n\nif (missingSymbols.length === 0) {\n  throw new Error(\n    'Fallback requested but no missing symbols found.'\n  );\n}\n\nconst farsideConfig = {\n  BTC: {\n    asset: 'bitcoin',\n    url: 'https://farside.co.uk/btc/'\n  },\n\n  ETH: {\n    asset: 'ethereum',\n    url: 'https://farside.co.uk/eth/'\n  }\n};\n\nconst requests = [];\n\nfor (const symbol of missingSymbols) {\n\n  const config = farsideConfig[symbol];\n\n  // No approved fallback source for this asset.\n  // Do NOT invent a replacement.\n  if (!config) {\n    continue;\n  }\n\n  requests.push({\n    json: {\n      symbol,\n      asset: config.asset,\n      targetDate,\n      url: config.url,\n      source: 'Farside'\n    }\n  });\n}\n\nreturn requests;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1872,
+        896
+      ],
+      "id": "a4a55e4e-c399-41f3-8cae-a633cd1696e9",
+      "name": "Prepare Farside Fallback Requests"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2064,
+        896
+      ],
+      "id": "dd1fbf4a-1591-478a-8a43-e27c60ef6398",
+      "name": "Get Farside Fallback Data"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// ATTACH FARSIDE FALLBACK METADATA\n// PRODUCTION MODE\n//\n// HTTP Request returns the HTML response,\n// so request metadata is re-attached here.\n// ==========================================\n\nconst responses = $input.all();\n\nconst requests =\n  $('Prepare Farside Fallback Requests').all();\n\nif (responses.length !== requests.length) {\n  throw new Error(\n    `Farside response/request count mismatch: ` +\n    `${responses.length}/${requests.length}`\n  );\n}\n\nreturn responses.map((response, index) => {\n\n  const request =\n    requests[index].json;\n\n  const html =\n    response.json.data;\n\n  if (\n    !html ||\n    typeof html !== 'string'\n  ) {\n    throw new Error(\n      `Farside HTML missing for ${request.symbol}`\n    );\n  }\n\n  return {\n    json: {\n      symbol: request.symbol,\n      asset: request.asset,\n      targetDate: request.targetDate,\n      url: request.url,\n      source: 'Farside',\n      html\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2288,
+        896
+      ],
+      "id": "8835eb2d-59fc-405a-a689-089d07052633",
+      "name": "Attach Farside Fallback Metadata"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// PARSE FARSIDE FALLBACK DATA\n// PRODUCTION MODE — BTC + ETH\n//\n// SAFETY:\n// - Exact targetDate required\n// - HTML page identity must match symbol\n// - \"-\" / \"—\" / empty fund cell = NOT READY\n// - 0.0 is valid\n// - Negative \"(5.0)\" supported\n// - Partial Total is NEVER accepted\n// ==========================================\n\nconst items = $input.all();\n\nconst months = [\n  'Jan', 'Feb', 'Mar', 'Apr',\n  'May', 'Jun', 'Jul', 'Aug',\n  'Sep', 'Oct', 'Nov', 'Dec'\n];\n\nconst pageIdentity = {\n  BTC: 'Bitcoin ETF Flow',\n  ETH: 'Ethereum ETF Flow'\n};\n\nfunction parseNumber(value) {\n  const cleaned = String(value)\n    .replace(/,/g, '')\n    .replace(/\\$/g, '')\n    .trim();\n\n  if (\n    !cleaned ||\n    cleaned === '-' ||\n    cleaned === '—'\n  ) {\n    throw new Error(\n      `Missing Farside numeric value: ${value}`\n    );\n  }\n\n  const isNegative =\n    cleaned.startsWith('(') &&\n    cleaned.endsWith(')');\n\n  const numericText = isNegative\n    ? cleaned.slice(1, -1).trim()\n    : cleaned;\n\n  const number = Number(numericText);\n\n  if (!Number.isFinite(number)) {\n    throw new Error(\n      `Invalid Farside number: ${value}`\n    );\n  }\n\n  return isNegative\n    ? -Math.abs(number)\n    : number;\n}\n\nreturn items.map(item => {\n\n  const {\n    symbol,\n    asset,\n    targetDate,\n    html\n  } = item.json;\n\n  // ----------------------------------------\n  // BASIC VALIDATION\n  // ----------------------------------------\n\n  if (!['BTC', 'ETH'].includes(symbol)) {\n    throw new Error(\n      `Unsupported Farside fallback symbol: ${symbol}`\n    );\n  }\n\n  if (\n    !targetDate ||\n    !/^\\d{4}-\\d{2}-\\d{2}$/.test(targetDate)\n  ) {\n    throw new Error(\n      `Invalid targetDate for ${symbol}: ${targetDate}`\n    );\n  }\n\n  if (\n    !html ||\n    typeof html !== 'string'\n  ) {\n    throw new Error(\n      `Farside HTML missing for ${symbol}`\n    );\n  }\n\n  // ----------------------------------------\n  // PAGE IDENTITY CHECK\n  // Prevent BTC/ETH response mix-up\n  // ----------------------------------------\n\n  const expectedPage =\n    pageIdentity[symbol];\n\n  if (!html.includes(expectedPage)) {\n    throw new Error(\n      `Farside page mismatch for ${symbol}. ` +\n      `Expected page containing \"${expectedPage}\".`\n    );\n  }\n\n  // ----------------------------------------\n  // TARGET DATE\n  // 2026-10-02 → \"2 Oct 2026\"\n  // ----------------------------------------\n\n  const [year, month, day] =\n    targetDate.split('-').map(Number);\n\n  const farsideDate =\n    `${day} ${months[month - 1]} ${year}`;\n\n  const dateIndex =\n    html.indexOf(farsideDate);\n\n  // Farside has not published this date yet.\n  if (dateIndex === -1) {\n    return {\n      json: {\n        symbol,\n        asset,\n        date: targetDate,\n        ready: false,\n        reason: 'TARGET_DATE_NOT_FOUND',\n        source: 'Farside'\n      }\n    };\n  }\n\n  // ----------------------------------------\n  // ISOLATE TARGET ROW\n  // ----------------------------------------\n\n  const rowStart =\n    html.lastIndexOf('<tr', dateIndex);\n\n  const rowEnd =\n    html.indexOf('</tr>', dateIndex);\n\n  if (\n    rowStart === -1 ||\n    rowEnd === -1\n  ) {\n    throw new Error(\n      `Could not isolate ${symbol} row for ${farsideDate}`\n    );\n  }\n\n  const row =\n    html.slice(rowStart, rowEnd + 5);\n\n  const cells = [\n    ...row.matchAll(\n      /<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi\n    )\n  ].map(match =>\n    match[1]\n      .replace(/<[^>]+>/g, '')\n      .replace(/&nbsp;/gi, ' ')\n      .replace(/&amp;/gi, '&')\n      .trim()\n  );\n\n  // date + at least 1 fund + total\n  if (cells.length < 3) {\n    throw new Error(\n      `Unexpected ${symbol} Farside row structure. ` +\n      `Received ${cells.length} cells.`\n    );\n  }\n\n  const fundValues =\n    cells.slice(1, -1);\n\n  const totalRaw =\n    cells[cells.length - 1];\n\n  // ----------------------------------------\n  // COMPLETENESS CHECK\n  // ----------------------------------------\n\n  const missingFundIndexes = [];\n\n  fundValues.forEach((value, index) => {\n    if (\n      value === '' ||\n      value === '-' ||\n      value === '—'\n    ) {\n      missingFundIndexes.push(index);\n    }\n  });\n\n  // CRITICAL:\n  // Farside may calculate a partial Total even\n  // while individual fund values are missing.\n  if (missingFundIndexes.length > 0) {\n    return {\n      json: {\n        symbol,\n        asset,\n        date: targetDate,\n        ready: false,\n        reason: 'INCOMPLETE_FUND_DATA',\n        missingFundIndexes,\n        totalRaw,\n        rawValues: cells,\n        source: 'Farside'\n      }\n    };\n  }\n\n  // ----------------------------------------\n  // FINAL FLOW\n  // ----------------------------------------\n\n  const netFlowUsdM =\n    parseNumber(totalRaw);\n\n  return {\n    json: {\n      symbol,\n      asset,\n      date: targetDate,\n      netFlowUsdM,\n      ready: true,\n      reason: 'COMPLETE_FUND_DATA',\n      source: 'Farside',\n\n      validation: {\n        fundCount: fundValues.length,\n        missingFundCount: 0,\n        totalRaw,\n        rawValues: cells\n      }\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2512,
+        896
+      ],
+      "id": "8ee5a705-986a-4e94-ab6b-808bef3ad1e6",
+      "name": "Parse Farside Fallback Data"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// EVALUATE FARSIDE FALLBACK RESULT\n// PRODUCTION MODE\n//\n// Every asset missing from SoSoValue must\n// be successfully resolved by Farside.\n//\n// One unresolved asset = fallback NOT ready.\n// ==========================================\n\nconst fallbackResults =\n  $input.all().map(item => item.json);\n\nconst soso =\n  $('Build SoSoValue ETF Dataset').first().json;\n\nconst targetDate =\n  soso.targetDate;\n\nconst missingSymbols =\n  soso.validation?.missingRequiredSymbols || [];\n\nif (!targetDate) {\n  throw new Error(\n    'SoSoValue targetDate not found.'\n  );\n}\n\nif (missingSymbols.length === 0) {\n  throw new Error(\n    'Fallback evaluation reached with no missing SoSoValue assets.'\n  );\n}\n\nconst resolvedAssets = [];\nconst unresolvedAssets = [];\n\nfor (const symbol of missingSymbols) {\n\n  const result =\n    fallbackResults.find(\n      item => item.symbol === symbol\n    );\n\n  // No fallback result at all\n  if (!result) {\n    unresolvedAssets.push({\n      symbol,\n      reason: 'FALLBACK_RESULT_NOT_FOUND'\n    });\n\n    continue;\n  }\n\n  // Exact trading date required\n  if (result.date !== targetDate) {\n    unresolvedAssets.push({\n      symbol,\n      reason: 'FALLBACK_DATE_MISMATCH'\n    });\n\n    continue;\n  }\n\n  // Farside must explicitly declare READY\n  if (result.ready !== true) {\n    unresolvedAssets.push({\n      symbol,\n      reason:\n        result.reason || 'FALLBACK_NOT_READY'\n    });\n\n    continue;\n  }\n\n  // Flow must actually exist.\n  // Zero is VALID.\n  if (\n    result.netFlowUsdM === null ||\n    result.netFlowUsdM === undefined ||\n    !Number.isFinite(Number(result.netFlowUsdM))\n  ) {\n    unresolvedAssets.push({\n      symbol,\n      reason: 'INVALID_FALLBACK_FLOW'\n    });\n\n    continue;\n  }\n\n  resolvedAssets.push({\n    symbol: result.symbol,\n    asset: result.asset,\n    date: result.date,\n    netFlowUsdM:\n      Number(result.netFlowUsdM),\n    source: result.source\n  });\n}\n\nconst fallbackResolved =\n  resolvedAssets.length === missingSymbols.length &&\n  unresolvedAssets.length === 0;\n\nreturn [{\n  json: {\n    targetDate,\n\n    requiredFallbackSymbols:\n      missingSymbols,\n\n    resolvedAssets,\n    unresolvedAssets,\n\n    validation: {\n      requiredCount:\n        missingSymbols.length,\n\n      resolvedCount:\n        resolvedAssets.length,\n\n      unresolvedCount:\n        unresolvedAssets.length,\n\n      fallbackResolved\n    },\n\n    datasetSource:\n      'FARSIDE_FALLBACK'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2736,
+        896
+      ],
+      "id": "c7a19b38-2c3a-4a91-a304-402df1c7c25e",
+      "name": "Evaluate Farside Fallback Result"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// BUILD RESOLVED CORE ETF DATASET\n// BTC + ETH ONLY\n//\n// PATH A: SoSoValue has BTC + ETH → use SoSoValue.\n// PATH B: SoSoValue incomplete → combine\n//         SoSoValue assets + resolved Farside assets.\n// ==========================================\n\nconst input = $input.first().json;\nconst soso = $('Build SoSoValue ETF Dataset').first().json;\n\nconst targetDate = soso.targetDate;\n\nif (!targetDate) {\n  throw new Error('SoSoValue targetDate not found.');\n}\n\nconst requiredSymbols = ['BTC', 'ETH'];\n\nconst sosoAssets = Array.isArray(soso.assets) ? soso.assets : [];\n\nconst fallbackWasNeeded = soso.validation?.needsFallback === true;\n\nlet fallbackAssets = [];\n\nif (fallbackWasNeeded) {\n  // Arrived from Evaluate Farside Fallback Result.\n  // Take whatever Farside resolved; the final check\n  // below decides whether BTC + ETH are both present.\n  fallbackAssets = Array.isArray(input.resolvedAssets)\n    ? input.resolvedAssets\n    : [];\n}\n\nconst combinedAssets = [...sosoAssets, ...fallbackAssets];\n\nconst finalAssets = [];\n\nfor (const symbol of requiredSymbols) {\n  const matches = combinedAssets.filter(a => a.symbol === symbol);\n\n  // Exactly one source must resolve each asset.\n  if (matches.length !== 1) continue;\n\n  const asset = matches[0];\n\n  if (\n    asset.date !== targetDate ||\n    asset.netFlowUsdM === null ||\n    asset.netFlowUsdM === undefined ||\n    !Number.isFinite(Number(asset.netFlowUsdM))\n  ) {\n    continue;\n  }\n\n  finalAssets.push({\n    symbol: asset.symbol,\n    asset: asset.asset,\n    date: asset.date,\n    netFlowUsdM: Number(asset.netFlowUsdM),\n    source: asset.source\n  });\n}\n\nconst readySymbols = finalAssets.map(a => a.symbol);\n\nconst missingSymbols = requiredSymbols.filter(\n  symbol => !readySymbols.includes(symbol)\n);\n\nconst allAssetsReady = missingSymbols.length === 0;\n\nreturn [{\n  json: {\n    targetDate,\n    assets: finalAssets,\n    validation: {\n      readyCount: finalAssets.length,\n      totalRequired: requiredSymbols.length,\n      allAssetsReady,\n      readySymbols,\n      missingSymbols,\n      fallbackUsed: fallbackWasNeeded,\n      fallbackResolved: fallbackWasNeeded\n        ? input.validation?.fallbackResolved === true\n        : true\n    },\n    datasetSource: fallbackWasNeeded\n      ? 'SOSOVALUE_PLUS_FARSIDE'\n      : 'SOSOVALUE'\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2960,
+        736
+      ],
+      "id": "13256e71-ca29-461b-b9fe-d3f989c1666c",
+      "name": "Build Resolved SoSoValue Dataset"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "31297466-9a7d-496c-a9de-dc835f3b26eb",
+              "leftValue": "={{ ['BTC', 'ETH'].every(symbol => $json.assets.some(asset => asset.symbol === symbol && asset.date === $json.targetDate && Number.isFinite(asset.netFlowUsdM))) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        3216,
+        736
+      ],
+      "id": "c19e53ca-a7dc-4372-b4db-dc25fd69a7e8",
+      "name": "Resolved Core ETF Data Ready?"
+    }
+  ],
+  "connections": {
+    "CryptoETF - Daily Flow Summary": {
+      "main": [
+        [
+          {
+            "node": "Select Tracked ETF Assets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Tracked ETF Assets": {
+      "main": [
+        [
+          {
+            "node": "Validate ETF Flow Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ETF Flow Polling Schedule": {
+      "main": [
+        [
+          {
+            "node": "CryptoETF - Daily Flow Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate ETF Flow Data": {
+      "main": [
+        [
+          {
+            "node": "Determine ETF Trading Date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine ETF Trading Date": {
+      "main": [
+        [
+          {
+            "node": "Prepare Final ETF Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Last Published ETF Date": {
+      "main": [
+        [
+          {
+            "node": "Check New ETF Trading Date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check New ETF Trading Date": {
+      "main": [
+        [
+          {
+            "node": "New ETF Trading Date?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New ETF Trading Date?": {
+      "main": [
+        [
+          {
+            "node": "Build Summary ETF Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Daily ETF Tweet": {
+      "main": [
+        [
+          {
+            "node": "Post Daily ETF Flows to X",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Daily ETF Flows to X": {
+      "main": [
+        [
+          {
+            "node": "Update Last Published ETF Date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Summary ETF Dataset": {
+      "main": [
+        [
+          {
+            "node": "Preserve ETF Daily Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare BTC & ETH History Records": {
+      "main": [
+        [
+          {
+            "node": "Save BTC & ETH Flow History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save BTC & ETH Flow History": {
+      "main": [
+        [
+          {
+            "node": "Trigger History Read Once",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger History Read Once": {
+      "main": [
+        [
+          {
+            "node": "Get BTC & ETH Flow History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get BTC & ETH Flow History": {
+      "main": [
+        [
+          {
+            "node": "Calculate ETF Historical Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate ETF Historical Context": {
+      "main": [
+        [
+          {
+            "node": "Build Historical Context Object",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Historical Context Object": {
+      "main": [
+        [
+          {
+            "node": "Attach Historical Context to ETF Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Historical Context to ETF Dataset": {
+      "main": [
+        [
+          {
+            "node": "Prepare Historical ETF Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Historical ETF Context": {
+      "main": [
+        [
+          {
+            "node": "Prepare Daily ETF Tweet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preserve ETF Daily Dataset": {
+      "main": [
+        [
+          {
+            "node": "Prepare BTC & ETH History Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Final ETF Dataset": {
+      "main": [
+        [
+          {
+            "node": "Final ETF Dataset Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final ETF Dataset Ready?": {
+      "main": [
+        [
+          {
+            "node": "Get ETF Publish State Before Final Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly ETF Report Schedule": {
+      "main": [
+        [
+          {
+            "node": "Get BTC Daily Flow History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get BTC Daily Flow History": {
+      "main": [
+        [
+          {
+            "node": "Get ETH Daily Flow History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get ETH Daily Flow History": {
+      "main": [
+        [
+          {
+            "node": "Build Weekly BTC & ETH Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Weekly BTC & ETH Dataset": {
+      "main": [
+        [
+          {
+            "node": "Is Weekly ETF Data Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Weekly ETF Data Ready?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Weekly ETF Graphic",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Last Published Week",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Weekly ETF Graphic": {
+      "main": [
+        [
+          {
+            "node": "Build FynBeat Weekly Template",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render Weekly ETF Graphic": {
+      "main": [
+        [
+          {
+            "node": "Download Weekly ETF Graphic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build FynBeat Weekly Template": {
+      "main": [
+        [
+          {
+            "node": "Render Weekly ETF Graphic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Last Published Week": {
+      "main": [
+        [
+          {
+            "node": "Is New Weekly Report?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is New Weekly Report?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Weekly ETF Graphic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Weekly ETF Graphic": {
+      "main": [
+        [
+          {
+            "node": "Merge X Media Upload Date",
+            "type": "main",
+            "index": 1
+          },
+          {
+            "node": "Prepare X Media Upload Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Initialize X Weekly Media Upload": {
+      "main": [
+        [
+          {
+            "node": "Merge X Media Upload Date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append X Weekly Media": {
+      "main": [
+        [
+          {
+            "node": "Finalize X Weekly Media Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge X Media Upload Date": {
+      "main": [
+        [
+          {
+            "node": "Append X Weekly Media",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare X Media Upload Metadata": {
+      "main": [
+        [
+          {
+            "node": "Initialize X Weekly Media Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize X Weekly Media Upload": {
+      "main": [
+        [
+          {
+            "node": "Prepare Weekly ETF Tweet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Weekly ETF Tweet": {
+      "main": [
+        [
+          {
+            "node": "Post Weekly ETF Report to X",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Weekly ETF Report to X": {
+      "main": [
+        [
+          {
+            "node": "Update Last Published Week",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare SoSoValue ETF Requests": {
+      "main": [
+        [
+          {
+            "node": "Get SoSoValue ETF Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get SoSoValue ETF Summary": {
+      "main": [
+        [
+          {
+            "node": "Build SoSoValue ETF Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build SoSoValue ETF Dataset": {
+      "main": [
+        [
+          {
+            "node": "SoSoValue Fallback Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final ETF Data Ready?": {
+      "main": [
+        [
+          {
+            "node": "Get Last Published ETF Date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Final ETF Dataset": {
+      "main": [
+        [
+          {
+            "node": "Final ETF Data Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check ETF Date Before Final Data": {
+      "main": [
+        [
+          {
+            "node": "ETF Date Needs Final Data?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ETF Date Needs Final Data?": {
+      "main": [
+        [
+          {
+            "node": "Final ETF Data Check Time?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final ETF Data Check Time?": {
+      "main": [
+        [
+          {
+            "node": "Prepare SoSoValue ETF Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get ETF Publish State Before Final Data": {
+      "main": [
+        [
+          {
+            "node": "Check ETF Date Before Final Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SoSoValue Fallback Needed?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Farside Fallback Requests",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Resolved SoSoValue Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Farside Fallback Requests": {
+      "main": [
+        [
+          {
+            "node": "Get Farside Fallback Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Farside Fallback Data": {
+      "main": [
+        [
+          {
+            "node": "Attach Farside Fallback Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Farside Fallback Metadata": {
+      "main": [
+        [
+          {
+            "node": "Parse Farside Fallback Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Farside Fallback Data": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Farside Fallback Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Farside Fallback Result": {
+      "main": [
+        [
+          {
+            "node": "Build Resolved SoSoValue Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Resolved SoSoValue Dataset": {
+      "main": [
+        [
+          {
+            "node": "Resolved Core ETF Data Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolved Core ETF Data Ready?": {
+      "main": [
+        [
+          {
+            "node": "Build Final ETF Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "nodeGroups": [],
+  "tags": []
+}

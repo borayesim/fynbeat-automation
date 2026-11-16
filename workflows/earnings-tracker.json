@@ -1,0 +1,875 @@
+{
+  "name": "FynBeats Earning Machine",
+  "nodes": [
+    {
+      "parameters": {
+        "text": "={{ $json.tweet }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.twitter",
+      "typeVersion": 2,
+      "position": [
+        2448,
+        -1264
+      ],
+      "id": "7f75ec67-df9b-4689-bd77-fa4597fc181d",
+      "name": "Create Tweet",
+      "credentials": {
+        "twitterOAuth2Api": {
+          "id": "",
+          "name": "X account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Earnings API Timing'den gelen günlük earnings calendar verisini al.\n// Input'u Clear node'undan değil, doğrudan API node'undan okuyoruz.\nconst data = $('Earnings API Timing').first().json;\n\nconst results = [];\n\n// ==========================================\n// BMO / PRE-MARKET\n// ==========================================\nfor (const company of data.pre || []) {\n  results.push({\n    json: {\n      symbol: company.symbol,\n      companyName: company.name,\n      earningsDate: data.date,\n      earningsTiming: 'BMO'\n    }\n  });\n}\n\n// ==========================================\n// AMC / AFTER-MARKET\n// ==========================================\nfor (const company of data.after || []) {\n  results.push({\n    json: {\n      symbol: company.symbol,\n      companyName: company.name,\n      earningsDate: data.date,\n      earningsTiming: 'AMC'\n    }\n  });\n}\n\n// ==========================================\n// TIMING NOT SUPPLIED\n// ==========================================\nfor (const company of data.notSupplied || []) {\n  results.push({\n    json: {\n      symbol: company.symbol,\n      companyName: company.name,\n      earningsDate: data.date,\n      earningsTiming: 'UNKNOWN'\n    }\n  });\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        96,
+        -848
+      ],
+      "id": "d22d7d23-cbb1-43a1-8074-4de314ee20b6",
+      "name": "Split Earnings By Timing"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2704e3cc-2d16-4e33-a76b-621e25aef0aa",
+              "leftValue": "={{ ['epsActual', 'epsEstimated', 'revenueActual', 'revenueEstimated'].every(key => {\n  const value = $json[key];\n  return typeof value === 'number' && Number.isFinite(value);\n}) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        560,
+        -1248
+      ],
+      "id": "eb7cb4c4-7279-4955-92c3-e0ad0caa67a7",
+      "name": "Actual Earning Available"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\n// ==========================================\n// FYNBEAT EARNINGS PREMIUM\n// BUILD EARNINGS TWEET\n// ==========================================\n\nconst {\n  symbol,\n  epsActual,\n  epsEstimated,\n  epsSurprise,\n  revenueActual,\n  revenueEstimated,\n  revenueSurprise\n} = $json;\n\n// Dört bilanço alanı zorunlu\nconst values = [\n  epsActual,\n  epsEstimated,\n  revenueActual,\n  revenueEstimated\n];\n\nif (!values.every(\n  value => typeof value === 'number' && Number.isFinite(value)\n)) {\n  throw new Error('Cannot build tweet: invalid earnings data.');\n}\n\nfunction formatEPS(value) {\n  return value < 0\n    ? `-$${Math.abs(value).toFixed(2)}`\n    : `$${value.toFixed(2)}`;\n}\n\nfunction formatRevenue(value) {\n  return `$${(value / 1e9).toFixed(2)}B`;\n}\n\nfunction getResult(actual, estimated, surprise) {\n  if (estimated === 0) {\n    if (actual > 0) return '📈 Beat (N/A%)';\n    if (actual < 0) return '📉 Miss (N/A%)';\n    return '➖ In Line (N/A%)';\n  }\n\n  const rawSurprise =\n    ((actual - estimated) / Math.abs(estimated)) * 100;\n\n  const displayPercent = Math.abs(rawSurprise).toFixed(2);\n\n  if (actual > estimated) {\n    return `📈 +${displayPercent}% Beat`;\n  }\n\n  if (actual < estimated) {\n    return `📉 -${displayPercent}% Miss`;\n  }\n\n  return '➖ 0.00% In Line';\n}\n\nconst lines = [\n  `🚨 $${symbol} Earnings`,\n  '',\n  `EPS: ${formatEPS(epsActual)} vs ${formatEPS(epsEstimated)} est.`,\n  getResult(epsActual, epsEstimated, epsSurprise),\n  '',\n  `Revenue: ${formatRevenue(revenueActual)} vs ${formatRevenue(revenueEstimated)} est.`,\n  getResult(revenueActual, revenueEstimated, revenueSurprise)\n];\n\nconst tweet = lines.join('\\n').trim();\n\nreturn {\n  json: {\n    ...$json,\n    tweet\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        -1264
+      ],
+      "id": "0653d9e2-73a5-401f-9785-7f35efb7ca8e",
+      "name": "Build Earnings Tweet"
+    },
+    {
+      "parameters": {
+        "operation": "rowNotExists",
+        "dataTableId": {
+          "__rl": true,
+          "value": "YOUR_POSTED_EARNINGS_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "Posted Earnings"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "symbol",
+              "keyValue": "={{ $json.symbol }}"
+            },
+            {
+              "keyName": "earningsDate",
+              "keyValue": "={{ $json.earningsDate }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2224,
+        -1264
+      ],
+      "id": "3a0fcbe0-6d74-4fcf-9f3e-5f181fd6d358",
+      "name": "If row does not exist1"
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "value": "YOUR_POSTED_EARNINGS_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "Posted Earnings"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "symbol": "={{ $('Build Earnings Tweet').item.json.symbol }}",
+            "earningsDate": "={{ $('Build Earnings Tweet').item.json.earningsDate }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "symbol",
+              "displayName": "symbol",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "earningsDate",
+              "displayName": "earningsDate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2992,
+        -1264
+      ],
+      "id": "0e3552a6-153c-42b0-abe8-9d6e8ea1f77a",
+      "name": "Record Posted Earnings"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// ==========================================\n// FYNBEAT EARNINGS PREMIUM\n// VALIDATE TWEET BEFORE X PUBLISH\n// FAIL CLOSED\n// ==========================================\n\nconst items = $input.all();\n\nreturn items\n  .filter(item => {\n    const tweet = item.json.tweet;\n\n    // Tweet geçerli bir metin olmalı\n    if (typeof tweet !== 'string') {\n      return false;\n    }\n\n    // Boş veya yalnızca boşluk içeren tweet'i reddet\n    if (tweet.trim().length === 0) {\n      return false;\n    }\n\n    // X için ihtiyatlı karakter sınırı\n    if ([...tweet].length > 275) {\n      return false;\n    }\n\n    return true;\n  })\n  .map(item => ({\n    json: item.json,\n    pairedItem: item.pairedItem\n  }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1968,
+        -1264
+      ],
+      "id": "df75cc11-60a2-4846-9c53-a1fd3903052b",
+      "name": "Validate Tweet Length"
+    },
+    {
+      "parameters": {
+        "url": "https://api.earningsapi.com/v1/calendar/earnings",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "date",
+              "value": "={{ $now.toFormat('yyyy-MM-dd') }}"
+            },
+            {
+              "name": "apikey",
+              "value": "YOUR_EARNINGSAPI_KEY"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -656,
+        -848
+      ],
+      "id": "0f01bdca-18ae-4d63-97c3-759fd8b9732c",
+      "name": "Earnings API Timing"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\n// ==========================================\n// FYNBEAT EARNINGS PREMIUM\n// CALCULATE EPS & REVENUE SURPRISE\n// ==========================================\n\nconst epsActual = $json.epsActual;\nconst epsEstimated = $json.epsEstimated;\n\nconst revenueActual = $json.revenueActual;\nconst revenueEstimated = $json.revenueEstimated;\n\n// Dört alan da geçerli sayı olmalı\nconst values = [\n  epsActual,\n  epsEstimated,\n  revenueActual,\n  revenueEstimated\n];\n\nif (!values.every(\n  value => typeof value === 'number' && Number.isFinite(value)\n)) {\n  throw new Error(\n    'Invalid earnings data: EPS or Revenue values missing.'\n  );\n}\n\n// Güvenli sürpriz hesaplaması\nfunction calculateSurprise(actual, estimated) {\n  if (estimated === 0) {\n    return null;\n  }\n\n  const surprise =\n    ((actual - estimated) / Math.abs(estimated)) * 100;\n\n  if (!Number.isFinite(surprise)) {\n    return null;\n  }\n\n  return Number(surprise.toFixed(2));\n}\n\nconst epsSurprise = calculateSurprise(\n  epsActual,\n  epsEstimated\n);\n\nconst revenueSurprise = calculateSurprise(\n  revenueActual,\n  revenueEstimated\n);\n\nreturn {\n  json: {\n    ...$json,\n\n    earningsDate: $json.earningsDate ?? $json.date,\n\n    epsSurprise,\n    revenueSurprise\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        976,
+        -1264
+      ],
+      "id": "80a5cb97-b6b1-4f99-96e0-b10642cc64c7",
+      "name": "Calculate FMP Earnings Surprise"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return {\n  json: {\n    symbol: $json.symbol,\n    companyName: $json.companyName,\n    earningsDate: $json.earningsDate,\n    earningsTiming: $json.earningsTiming,\n\n    epsActual: $json.epsActual,\n    epsEstimated: $json.epsEstimated,\n    epsSurprise: $json.epsSurprise,\n\n    revenueActual: $json.revenueActual,\n    revenueEstimated: $json.revenueEstimated,\n    revenueSurprise: $json.revenueSurprise\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1376,
+        -1264
+      ],
+      "id": "6d396abc-564b-4209-9bae-2f6a628c7b05",
+      "name": "Prepare FMP Tweet Data"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 10
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -912,
+        -848
+      ],
+      "id": "2e1ff2e6-d18d-44d6-99c2-c6fb9e80d88e",
+      "name": "Daily Earnings Preparation - 10AM"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -912,
+        -1248
+      ],
+      "id": "2d951cb4-2e42-41bd-98be-57cc42b20d92",
+      "name": "Earnings Polling - Every 5 Min"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ABD piyasa saatini baz al.\n// America/New_York timezone DST'yi otomatik yönetir.\nconst nowNY = $now.setZone('America/New_York');\n\nconst hour = nowNY.hour;\nconst minute = nowNY.minute;\nconst currentMinutes = hour * 60 + minute;\n\n// BMO polling: 06:00–10:00 New York\nconst bmoStart = 6 * 60;\nconst bmoEnd   = 10 * 60;\n\n// AMC polling: 15:00–19:00 New York\nconst amcStart = 15 * 60;\nconst amcEnd   = 19 * 60;\n\nlet activeWindow = null;\n\n// Earnings tarihi artık New York takvim tarihine göre belirleniyor\nconst watchlistDate = nowNY.toFormat('yyyy-MM-dd');\n\n// BMO\nif (currentMinutes >= bmoStart && currentMinutes < bmoEnd) {\n  activeWindow = 'BMO';\n}\n\n// AMC\nif (currentMinutes >= amcStart && currentMinutes < amcEnd) {\n  activeWindow = 'AMC';\n}\n\n// Aktif polling penceresinde değilsek workflow burada durur\nif (!activeWindow) {\n  return [];\n}\n\nreturn [\n  {\n    json: {\n      activeWindow,\n      watchlistDate,\n      checkedAtNY: nowNY.toISO()\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -688,
+        -1248
+      ],
+      "id": "bc553851-531b-4da5-b18b-830537ee8abc",
+      "name": "Determine Active Earnings Window"
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "value": "YOUR_DAILY_EARNINGS_WATCHLIST_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "Daily Earnings Watchlist"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "symbol": "={{ $json.symbol }}",
+            "companyName": "={{ $json.companyName }}",
+            "earningsDate": "={{ $json.earningsDate }}",
+            "earningsTiming": "={{ $json.earningsTiming }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "symbol",
+              "displayName": "symbol",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "companyName",
+              "displayName": "companyName",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "earningsDate",
+              "displayName": "earningsDate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "earningsTiming",
+              "displayName": "earningsTiming",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "marketCap",
+              "displayName": "marketCap",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1088,
+        -880
+      ],
+      "id": "6e214dce-6b07-45f1-ac82-71d45c26b3d0",
+      "name": "Save Daily Earnings Watchlist"
+    },
+    {
+      "parameters": {
+        "operation": "deleteRows",
+        "dataTableId": {
+          "__rl": true,
+          "value": "YOUR_DAILY_EARNINGS_WATCHLIST_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "Daily Earnings Watchlist"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "condition": "gt",
+              "keyValue": "0"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -144,
+        -864
+      ],
+      "id": "0e538723-2269-48b7-84b9-5198039520e4",
+      "name": "Clear Daily Earnings Watchlist",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "url": "https://financialmodelingprep.com/stable/earnings-calendar",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "from",
+              "value": "={{ $json.watchlistDate }}"
+            },
+            {
+              "name": "to",
+              "value": "={{ $json.watchlistDate }}"
+            },
+            {
+              "name": "apikey",
+              "value": "YOUR_FMP_API_KEY"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -272,
+        -1248
+      ],
+      "id": "e833f186-bfc3-4a46-8088-067047d4163a",
+      "name": "FMP Poll Current Earnings"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "YOUR_DAILY_EARNINGS_WATCHLIST_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "Daily Earnings Watchlist"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "earningsDate",
+              "keyValue": "={{ $('Determine Active Earnings Window').item.json.watchlistDate }}"
+            },
+            {
+              "keyName": "earningsTiming",
+              "keyValue": "={{ $('Determine Active Earnings Window').item.json.activeWindow }}"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -48,
+        -1248
+      ],
+      "id": "056d994c-9562-46e3-9382-6b629f5fc82a",
+      "name": "Get Active Earnings Watchlist"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n // ==========================================\n // FYNBEAT EARNINGS PREMIUM\n // MATCH FMP EARNINGS WITH DAILY WATCHLIST\n // SYMBOL + EARNINGS DATE VALIDATION\n // FAIL CLOSED\n // ==========================================\n\n // 1. Aktif Premium watchlist şirketlerini al\n const watchlist = $input.all().map(item => item.json);\n\n // 2. FMP Earnings Calendar verilerini al\n const rawFmp = $('FMP Poll Current Earnings')\n   .all()\n   .map(item => item.json);\n\n // 3. FMP response formatlarını normalize et\n const fmpReports = rawFmp.flatMap(item => {\n   if (Array.isArray(item)) {\n     return item;\n   }\n\n   if (Array.isArray(item.data)) {\n     return item.data;\n   }\n\n   return [item];\n });\n\n // 4. Premium watchlist'i sembol bazında hazırla\n const watchlistBySymbol = new Map(\n   watchlist\n     .filter(company =>\n       typeof company.symbol === 'string' &&\n       company.symbol.trim() !== '' &&\n       typeof company.earningsDate === 'string' &&\n       /^\\d{4}-\\d{2}-\\d{2}$/.test(company.earningsDate)\n     )\n     .map(company => [\n       company.symbol.trim().toUpperCase(),\n       company\n     ])\n );\n\n const matched = [];\n\n // 5. FMP raporlarını eşleştir\n for (const report of fmpReports) {\n\n   if (!report || typeof report !== 'object') {\n     continue;\n   }\n\n   const symbol = String(report.symbol ?? '')\n     .trim()\n     .toUpperCase();\n\n   if (!symbol) {\n     continue;\n   }\n\n   // Şirket aktif Premium watchlist'te mi?\n   const company = watchlistBySymbol.get(symbol);\n\n   if (!company) {\n     continue;\n   }\n\n   // 6. Bilanço tarihi güvenlik kontrolü\n   const reportDate = String(report.date ?? '').trim();\n   const watchlistDate = company.earningsDate;\n\n   // Eksik, geçersiz veya farklı tarih reddedilir\n   if (\n     !/^\\d{4}-\\d{2}-\\d{2}$/.test(reportDate) ||\n     reportDate !== watchlistDate\n   ) {\n     continue;\n   }\n\n   // 7. Doğrulanmış bilanço kaydını oluştur\n   matched.push({\n     json: {\n       ...company,\n       ...report,\n\n       // Kritik metadata watchlist'ten alınır\n       symbol: company.symbol,\n       companyName: company.companyName,\n       earningsDate: company.earningsDate,\n       earningsTiming: company.earningsTiming,\n       marketCap: company.marketCap\n     }\n   });\n }\n\n // 8. Eşleşme yoksa boş çıktı\n return matched;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        336,
+        -1248
+      ],
+      "id": "f8644e51-ee8b-4b82-b8a6-c008dcad9f3f",
+      "name": "Match FMP Earnings With Watchlist"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "7703ed58-1085-42fe-8bd2-2b7011eb082c",
+              "leftValue": "={{ ['BMO', 'AMC'].includes($json.earningsTiming) }}",
+              "rightValue": "UNKNOWN",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        416,
+        -848
+      ],
+      "id": "8eaf5b39-6017-4485-a733-2093c2ffb30e",
+      "name": "Keep BMO & AMC Only"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "abf15379-4e7b-4eee-9294-e60cd7acc440",
+              "leftValue": "={{ \n  Array.isArray($json.pre) &&\n  Array.isArray($json.after) &&\n  Array.isArray($json.notSupplied)\n}}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -400,
+        -848
+      ],
+      "id": "f4d23fc8-c0c6-457e-bcd9-f8c9bb967c02",
+      "name": "Validate Daily Earnings Calendar"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "7d1d42c5-6c34-42eb-830f-904ace20b59a",
+              "leftValue": "={{ ['NVDA','MSFT','AAPL','GOOGL','AMZN','META','TSLA','AMD','AVGO','TSM','NFLX','PLTR','ORCL','MU','ASML','JPM','WMT'].includes(String($json.symbol ?? '').trim().toUpperCase()) }}",
+              "rightValue": 100000000000,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        784,
+        -864
+      ],
+      "id": "ff88423e-be7f-421e-8981-4e3664d2613a",
+      "name": "Filter Premium Earnings Companies"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ec752378-26ce-4d48-aebc-60adf0a7bac4",
+              "leftValue": "={{ ['NVDA','MSFT','AAPL','GOOGL','AMZN','META','TSLA','AMD','AVGO','TSM','NFLX','PLTR','ORCL','MU','ASML','JPM','WMT'].includes(String($json.symbol ?? '').trim().toUpperCase()).toString().toBoolean() }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        144,
+        -1456
+      ],
+      "id": "fba52d73-d563-415a-b756-9aec8a3cf891",
+      "name": "Filter Active Premium Companies"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\n// ==========================================\n// FYNBEAT EARNINGS PREMIUM\n// VALIDATE X PUBLISH SUCCESS\n// FAIL CLOSED\n// ==========================================\n\n// X Create Tweet node'unun yanıtı\nconst response = $input.item.json;\n\n// X API başarılı tweet oluşturduğunda\n// genellikle data.id döndürür.\nconst tweetId = response.data?.id ?? response.id;\n\n// Geçerli tweet ID'si zorunlu\nif (\n  (typeof tweetId !== 'string' &&\n   typeof tweetId !== 'number') ||\n  !/^\\d+$/.test(String(tweetId))\n) {\n  throw new Error(\n    'X publish validation failed: valid tweet ID missing.'\n  );\n}\n\n// Başarılı yayın doğrulandı.\n// Sonraki node Posted Earnings kaydını oluşturabilir.\nreturn {\n  json: {\n    ...response,\n    xPublishValidated: true,\n    publishedTweetId: String(tweetId)\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2704,
+        -1264
+      ],
+      "id": "aafb1dfa-b511-454e-84ab-e14636d6dc61",
+      "name": "Validate X Earnings Publish Success"
+    }
+  ],
+  "connections": {
+    "Create Tweet": {
+      "main": [
+        [
+          {
+            "node": "Validate X Earnings Publish Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Earnings By Timing": {
+      "main": [
+        [
+          {
+            "node": "Keep BMO & AMC Only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Actual Earning Available": {
+      "main": [
+        [
+          {
+            "node": "Calculate FMP Earnings Surprise",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Build Earnings Tweet": {
+      "main": [
+        [
+          {
+            "node": "Validate Tweet Length",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If row does not exist1": {
+      "main": [
+        [
+          {
+            "node": "Create Tweet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Tweet Length": {
+      "main": [
+        [
+          {
+            "node": "If row does not exist1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Earnings API Timing": {
+      "main": [
+        [
+          {
+            "node": "Validate Daily Earnings Calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate FMP Earnings Surprise": {
+      "main": [
+        [
+          {
+            "node": "Prepare FMP Tweet Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare FMP Tweet Data": {
+      "main": [
+        [
+          {
+            "node": "Build Earnings Tweet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Earnings Preparation - 10AM": {
+      "main": [
+        [
+          {
+            "node": "Earnings API Timing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Earnings Polling - Every 5 Min": {
+      "main": [
+        [
+          {
+            "node": "Determine Active Earnings Window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Active Earnings Window": {
+      "main": [
+        [
+          {
+            "node": "FMP Poll Current Earnings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear Daily Earnings Watchlist": {
+      "main": [
+        [
+          {
+            "node": "Split Earnings By Timing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FMP Poll Current Earnings": {
+      "main": [
+        [
+          {
+            "node": "Get Active Earnings Watchlist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Active Earnings Watchlist": {
+      "main": [
+        [
+          {
+            "node": "Filter Active Premium Companies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match FMP Earnings With Watchlist": {
+      "main": [
+        [
+          {
+            "node": "Actual Earning Available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keep BMO & AMC Only": {
+      "main": [
+        [
+          {
+            "node": "Filter Premium Earnings Companies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Daily Earnings Calendar": {
+      "main": [
+        [
+          {
+            "node": "Clear Daily Earnings Watchlist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Premium Earnings Companies": {
+      "main": [
+        [
+          {
+            "node": "Save Daily Earnings Watchlist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Daily Earnings Watchlist": {
+      "main": [
+        []
+      ]
+    },
+    "Filter Active Premium Companies": {
+      "main": [
+        [
+          {
+            "node": "Match FMP Earnings With Watchlist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate X Earnings Publish Success": {
+      "main": [
+        [
+          {
+            "node": "Record Posted Earnings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "nodeGroups": [],
+  "tags": []
+}
